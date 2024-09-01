@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package proberchan.probes.ping;
+
+option go_package = "github.com/cuteip/proberchan/config";
+
+message PingConfig {
+    // IP Addresses
+    // 192.0.2.1, 192.0.2.2, ...
+    // TODO: FQDN 指定
+    repeated string targets = 1;
+
+    int32 interval_ms = 2;
+    int32 timeout_ms = 3;
+
+    bool df = 4;
+}

@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package proberchan.prober;
+
+import "config/ping.proto";
+
+option go_package = "github.com/cuteip/proberchan/config";
+
+message ProberConfig {
+    string name = 1;
+
+    enum Type {
+        PING = 0;
+    }
+    Type type = 2;
+
+    oneof probe {
+        proberchan.probes.ping.PingConfig ping_probe = 3;
+    }
+}

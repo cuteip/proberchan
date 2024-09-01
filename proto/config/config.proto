@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package proberchan.config;
+
+import "config/prober.proto";
+
+option go_package = "github.com/cuteip/proberchan/config";
+
+message ConfigRoot {
+    proberchan.prober.ProberConfig probe = 3;
+}
