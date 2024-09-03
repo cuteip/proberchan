@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
 	configpb "github.com/cuteip/proberchan/gen/config"
+	"github.com/cuteip/proberchan/internal/dnsutil"
 	probing "github.com/prometheus-community/pro-bing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -21,12 +25,13 @@ var (
 
 type Runner struct {
 	l       *zap.Logger
+	dns     *dnsutil.Runner
 	latency metric.Int64Histogram
 	timeout metric.Int64Counter
 	failed  metric.Int64Counter
 }
 
-func New(l *zap.Logger) (*Runner, error) {
+func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 	latencyHist, err := otel.Meter("proberchan").Int64Histogram("ping_latency",
 		metric.WithUnit("ns"),
 		metric.WithDescription("Latency (RTT) of ping probes"),
@@ -48,6 +53,7 @@ func New(l *zap.Logger) (*Runner, error) {
 	}
 	return &Runner{
 		l:       l,
+		dns:     dns,
 		latency: latencyHist,
 		timeout: timeoutCounter,
 		failed:  failedCounter,
@@ -74,20 +80,36 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
-			err := r.ProbeByTarget(ctx, conf, target)
-			if err != nil {
-				r.l.Warn("failed to probe", zap.Error(err))
+			// target は config に書かれた "targets" の文字列そのまま
+			// めっちゃややこしい
+			var dstIPAddrs []netip.Addr // 実際に ping する宛先 IP アドレス
+			targetIPAddr, err := netip.ParseAddr(target)
+			if err == nil {
+				dstIPAddrs = []netip.Addr{targetIPAddr}
+			} else {
+				// target が IP アドレスでない場合は DNS クエリを投げて解決する
+				ips, err := r.dns.ResolveIPAddrByQNAME(ctx, mustQnameSuffixDot(target))
+				if err != nil {
+					r.l.Warn("failed to resolve IP address", zap.Error(err))
+					return
+				}
+				dstIPAddrs = ips
+			}
+			// とりあえずは逐次で ping する
+			for _, dstIPAddr := range dstIPAddrs {
+				err := r.ProbeByIPAddr(ctx, conf, target, dstIPAddr)
+				if err != nil {
+					r.l.Warn("failed to probe", zap.Error(err))
+				}
 			}
 		}(target)
 	}
 	wg.Wait()
 }
 
-func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.PingConfig, target string) error {
-	pinger, err := probing.NewPinger(target)
-	if err != nil {
-		return err
-	}
+func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *configpb.PingConfig, targetInConfig string, ipAddr netip.Addr) error {
+	pinger := probing.New("")
+	pinger.SetIPAddr(&net.IPAddr{IP: ipAddr.AsSlice()})
 	pinger.Count = 1
 	if conf.GetDf() {
 		pinger.SetDoNotFragment(true)
@@ -104,23 +126,36 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.PingConfig, t
 	}
 	pingerCtx, _ := context.WithTimeout(ctx, timeout)
 	r.l.Debug("ping run ...", zap.String("pinger", fmt.Sprintf("%+v", pinger)), zap.Duration("timeout", timeout))
-	attr := attribute.NewSet(
-		attribute.String("target", target),
+	ipVersion := 4
+	if ipAddr.Is6() {
+		ipVersion = 6
+	}
+	attrSert := attribute.NewSet(
+		attribute.String("target", targetInConfig), // target には config に書かれている "targets" をそのまま
 		attribute.Int("size", pinger.Size),
 		attribute.Bool("df", conf.GetDf()),
+		attribute.String("ip_address", ipAddr.String()),
+		attribute.Int("ip_version", ipVersion),
 	)
-	err = pinger.RunWithContext(pingerCtx)
+	err := pinger.RunWithContext(pingerCtx)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			// ping timeout
-			r.timeout.Add(ctx, 1, metric.WithAttributeSet(attr))
+			r.timeout.Add(ctx, 1, metric.WithAttributeSet(attrSert))
 			return nil
 		}
-		r.failed.Add(ctx, 1, metric.WithAttributeSet(attr))
+		r.failed.Add(ctx, 1, metric.WithAttributeSet(attrSert))
 		return err
 	}
 	stats := pinger.Statistics()
 	// count は 1 だから min, max, avg もどれも同じになる
-	r.latency.Record(ctx, stats.MaxRtt.Nanoseconds(), metric.WithAttributeSet(attr))
+	r.latency.Record(ctx, stats.MaxRtt.Nanoseconds(), metric.WithAttributeSet(attrSert))
 	return nil
+}
+
+func mustQnameSuffixDot(input string) string {
+	if !strings.HasSuffix(input, ".") {
+		return fmt.Sprintf("%s.", input)
+	}
+	return input
 }

@@ -25,9 +25,9 @@ type PingConfig struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	// IP Addresses
-	// 192.0.2.1, 192.0.2.2, ...
-	// TODO: FQDN 指定
+	// IPv4 Address / IPv6 Address / FQDN
+	// "192.0.2.1", "2001:db8::1", "target1.example.com", ...
+	// FQDN は A, AAAA レコードどちらも解決を試み、得られた IP アドレスのすべてを target として扱う
 	Targets    []string `protobuf:"bytes,1,rep,name=targets,proto3" json:"targets,omitempty"`
 	IntervalMs int32    `protobuf:"varint,2,opt,name=interval_ms,json=intervalMs,proto3" json:"interval_ms,omitempty"`
 	TimeoutMs  int32    `protobuf:"varint,3,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`

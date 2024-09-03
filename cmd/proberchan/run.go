@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"time"
 
 	configpb "github.com/cuteip/proberchan/gen/config"
+	"github.com/cuteip/proberchan/internal/dnsutil"
 	"github.com/cuteip/proberchan/probers/ping"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -56,7 +58,20 @@ func run(cmd *cobra.Command, _ []string) error {
 
 	l.Sugar().Debugf("config: %+v", conf)
 
-	proberPing, err := ping.New(l)
+	dnsResolverIPAddrPortStr := conf.GetDnsResolver()
+	_, err = netip.ParseAddrPort(dnsResolverIPAddrPortStr)
+	if err != nil {
+		return errors.Wrapf(err, "failed to parse resolver address. must be '<ip_address>:<port>': %s", dnsResolverIPAddrPortStr)
+	}
+
+	disableIPv4Target := conf.GetDisableIpv4Target()
+	disableIPv6Target := conf.GetDisableIpv6Target()
+	if disableIPv4Target && disableIPv6Target {
+		return errors.New("either IPv4 or IPv6 must be enabled")
+	}
+
+	dnsRunner := dnsutil.New(dnsResolverIPAddrPortStr, disableIPv4Target, disableIPv6Target)
+	proberPing, err := ping.New(l, dnsRunner)
 	if err != nil {
 		return err
 	}
@@ -110,6 +125,10 @@ func initMeterProvider(ctx context.Context) (func(context.Context) error, error)
 				MaxSize:  160,
 				MaxScale: 20,
 			},
+			// Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
+			// 	// nanoseconds
+			// 	Boundaries: []float64{1e6, 2e6, 5e6, 10e6, 20e6, 50e6, 100e6, 200e6, 500e6, 1000e6},
+			// },
 		},
 	)
 
