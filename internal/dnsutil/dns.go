@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/pkg/errors"
 )
 
 type Runner struct {
@@ -41,7 +42,10 @@ func (r *Runner) ResolveIPAddrByQNAME(ctx context.Context, qname string) ([]neti
 		m.RecursionDesired = true
 		ans, _, err := client.ExchangeContext(ctx, m, r.resolver)
 		if err != nil { // TODO: SERVFAIL など判定
-			return nil, err
+			return nil, errors.Wrapf(err, "failed to resolve %s", qname)
+		}
+		if len(ans.Answer) == 0 {
+			return nil, errors.Errorf("rr length is 0: %s", qname)
 		}
 		for _, a := range ans.Answer {
 			switch answer := a.(type) {

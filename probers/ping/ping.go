@@ -21,13 +21,16 @@ import (
 
 var (
 	defaultTimeout = 1 * time.Second
+
+	attrResonFailedToResolveIPAddr = attribute.String("reason", "failed to resolve IP address")
+	attrPingTimeout                = attribute.String("reason", "ping timeout")
+	attrResonUnknown               = attribute.String("reason", "unknown")
 )
 
 type Runner struct {
 	l       *zap.Logger
 	dns     *dnsutil.Runner
 	latency metric.Int64Histogram
-	timeout metric.Int64Counter
 	failed  metric.Int64Counter
 }
 
@@ -39,14 +42,9 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	timeoutCounter, err := otel.Meter("proberchan").Int64Counter("ping_timeout",
-		metric.WithDescription("Total number of timeout ping probes"),
-	)
-	if err != nil {
-		return nil, err
-	}
 	failedCounter, err := otel.Meter("proberchan").Int64Counter("ping_failed",
-		metric.WithDescription("Total number of failed ping probes (exclude timeout)"),
+		metric.WithDescription("Total number of failed ping probes"),
+		// 失敗理由は "reason" につける
 	)
 	if err != nil {
 		return nil, err
@@ -55,7 +53,6 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 		l:       l,
 		dns:     dns,
 		latency: latencyHist,
-		timeout: timeoutCounter,
 		failed:  failedCounter,
 	}, nil
 }
@@ -80,6 +77,9 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
+			baseAttr := []attribute.KeyValue{
+				attribute.String("target", target),
+			}
 			// target は config に書かれた "targets" の文字列そのまま
 			// めっちゃややこしい
 			var dstIPAddrs []netip.Addr // 実際に ping する宛先 IP アドレス
@@ -91,13 +91,15 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 				ips, err := r.dns.ResolveIPAddrByQNAME(ctx, mustQnameSuffixDot(target))
 				if err != nil {
 					r.l.Warn("failed to resolve IP address", zap.Error(err))
+					attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
+					r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 					return
 				}
 				dstIPAddrs = ips
 			}
 			// とりあえずは逐次で ping する
 			for _, dstIPAddr := range dstIPAddrs {
-				err := r.ProbeByIPAddr(ctx, conf, target, dstIPAddr)
+				err := r.ProbeByIPAddr(ctx, conf, dstIPAddr, baseAttr)
 				if err != nil {
 					r.l.Warn("failed to probe", zap.Error(err))
 				}
@@ -107,7 +109,7 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 	wg.Wait()
 }
 
-func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *configpb.PingConfig, targetInConfig string, ipAddr netip.Addr) error {
+func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *configpb.PingConfig, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
 	pinger := probing.New("")
 	pinger.SetIPAddr(&net.IPAddr{IP: ipAddr.AsSlice()})
 	pinger.Count = 1
@@ -130,26 +132,30 @@ func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *configpb.PingConfig, t
 	if ipAddr.Is6() {
 		ipVersion = 6
 	}
-	attrSert := attribute.NewSet(
-		attribute.String("target", targetInConfig), // target には config に書かれている "targets" をそのまま
+
+	attrs := []attribute.KeyValue{
 		attribute.Int("size", pinger.Size),
 		attribute.Bool("df", conf.GetDf()),
 		attribute.String("ip_address", ipAddr.String()),
 		attribute.Int("ip_version", ipVersion),
-	)
+	}
+	attrs = append(attrs, baseAttrs...)
+
 	err := pinger.RunWithContext(pingerCtx)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			// ping timeout
-			r.timeout.Add(ctx, 1, metric.WithAttributeSet(attrSert))
+			attrs = append(attrs, attrPingTimeout)
+			r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 			return nil
 		}
-		r.failed.Add(ctx, 1, metric.WithAttributeSet(attrSert))
+		attrs = append(attrs, attrResonUnknown)
+		r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 		return err
 	}
 	stats := pinger.Statistics()
 	// count は 1 だから min, max, avg もどれも同じになる
-	r.latency.Record(ctx, stats.MaxRtt.Nanoseconds(), metric.WithAttributeSet(attrSert))
+	r.latency.Record(ctx, stats.MaxRtt.Nanoseconds(), metric.WithAttributes(attrs...))
 	return nil
 }
 
