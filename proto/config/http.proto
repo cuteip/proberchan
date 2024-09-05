@@ -19,4 +19,6 @@ message HttpConfig {
     // IPv6 シングルスタック環境であれば '6' のみ指定する
     // IPv4, IPv6 デュアルスタック環境であれば '4' と '6' の両方を指定する
     repeated int32 resolve_ip_versions = 4;
+
+    string user_agent = 5;
 }

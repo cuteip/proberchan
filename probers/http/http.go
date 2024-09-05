@@ -25,7 +25,8 @@ import (
 )
 
 var (
-	defaultTimeout = 1 * time.Second
+	defaultTimeout   = 1 * time.Second
+	defaultUserAgent = "proberchan (+https://github.com/cuteip/proberchan)"
 
 	attrReasonFailedToParseURL  = attribute.String("reason", "failed to parse URL")
 	attrReasonUnknown           = attribute.String("reason", "unknown")
@@ -129,6 +130,13 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 		timeout = time.Duration(conf.GetTimeoutMs()) * time.Millisecond
 	}
 
+	var userAgent string
+	if conf.GetUserAgent() == "" {
+		userAgent = defaultUserAgent
+	} else {
+		userAgent = conf.GetUserAgent()
+	}
+
 	type ipVersion struct {
 		version int
 		network string // net.Dial network
@@ -149,11 +157,7 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 		httpCaller := probinghttp.NewHttpCaller(target.String(),
 			probinghttp.WithHTTPCallerLogger(NewLogger(r.l, r, baseAttrs2)),
 			probinghttp.WithHTTPCallerClient(&http.Client{
-				Transport: &http.Transport{
-					DialContext: func(_ context.Context, _, addr string) (net.Conn, error) {
-						return net.Dial(ipv.network, addr)
-					},
-				},
+				Transport: newCustomTransport(ipv.network, userAgent),
 				// timeout などは WithHTTPCallerTimeout が優先される？
 			}),
 			probinghttp.WithHTTPCallerTimeout(timeout),
@@ -176,6 +180,26 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 		)
 		httpCaller.RunWithContext(ctx)
 	}
+}
+
+type customTransport struct {
+	transport http.RoundTripper
+	userAgent string
+}
+
+func newCustomTransport(dialNetwork string, userAgent string) http.RoundTripper {
+	dt := http.DefaultTransport.(*http.Transport)
+	dt.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return net.Dial(dialNetwork, addr)
+	}
+	return &customTransport{
+		transport: dt,
+		userAgent: userAgent,
+	}
+}
+func (t *customTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("User-Agent", t.userAgent)
+	return t.transport.RoundTrip(req)
 }
 
 type logger struct {
