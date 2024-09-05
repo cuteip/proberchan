@@ -2,27 +2,34 @@ package probehttp
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	configpb "github.com/cuteip/proberchan/gen/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
 	"github.com/cuteip/proberchan/otelconst"
+	"github.com/cuteip/proberchan/probinghttp"
 	probing "github.com/prometheus-community/pro-bing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var (
 	defaultTimeout = 1 * time.Second
 
-	attrReasonFailedToParseURL = attribute.String("reason", "failed to parse URL")
-	attrResonUnknown           = attribute.String("reason", "unknown")
+	attrReasonFailedToParseURL  = attribute.String("reason", "failed to parse URL")
+	attrReasonUnknown           = attribute.String("reason", "unknown")
+	attrReasonConnectionRefused = attribute.String("reason", "connection refused")
 
 	ViewExponentialHistograms = []sdkmetric.View{
 		sdkmetric.NewView(sdkmetric.Instrument{Name: "http_response_time"}, otelconst.ExponentialHistogramStream),
@@ -69,6 +76,16 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 	}, nil
 }
 
+func (r *Runner) ValidateConfig(conf *configpb.HttpConfig) error {
+	if len(conf.GetTargets()) == 0 {
+		return errors.New("no targets. at least one target is required")
+	}
+	if len(conf.GetResolveIpVersions()) == 0 {
+		return errors.New("no resolve_ip_versions. at least one resolve_ip_versions is required")
+	}
+	return nil
+}
+
 func (r *Runner) ProbeTickerLoop(ctx context.Context, conf *configpb.HttpConfig) error {
 	interval := time.Duration(conf.GetIntervalMs()) * time.Millisecond
 	ticker := time.NewTicker(interval)
@@ -111,26 +128,121 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 	} else {
 		timeout = time.Duration(conf.GetTimeoutMs()) * time.Millisecond
 	}
-	httpCaller := probing.NewHttpCaller(target.String(),
-		probing.WithHTTPCallerTimeout(timeout),
-		probing.WithHTTPCallerMethod(http.MethodGet),
-		probing.WithHTTPCallerOnResp(func(suite *probing.TraceSuite, info *probing.HTTPCallInfo) {
-			responseTime := suite.GetGeneralEnd().Sub(suite.GetGeneralStart()) // おそらく DNS 名前解決時間含む
-			ttfb := suite.GetFirstByteReceived().Sub(suite.GetGeneralStart())  // おそらく DNS 名前解決時間含む
-			attrs := []attribute.KeyValue{
-				attribute.Int("status_code", info.StatusCode),
+
+	type ipVersion struct {
+		version int
+		network string // net.Dial network
+	}
+	ipVersions := []ipVersion{}
+	for _, ipv := range conf.GetResolveIpVersions() {
+		switch ipv {
+		case 4:
+			ipVersions = append(ipVersions, ipVersion{version: 4, network: "tcp4"})
+		case 6:
+			ipVersions = append(ipVersions, ipVersion{version: 6, network: "tcp6"})
+		default:
+			r.l.Warn("unknown resolve_ip_versions", zap.Int32("ip_version", ipv))
+		}
+	}
+	for _, ipv := range ipVersions {
+		baseAttrs2 := append(baseAttrs, attribute.Int("ip_version", ipv.version))
+		httpCaller := probinghttp.NewHttpCaller(target.String(),
+			probinghttp.WithHTTPCallerLogger(NewLogger(r.l, r, baseAttrs2)),
+			probinghttp.WithHTTPCallerClient(&http.Client{
+				Transport: &http.Transport{
+					DialContext: func(_ context.Context, _, addr string) (net.Conn, error) {
+						return net.Dial(ipv.network, addr)
+					},
+				},
+				// timeout などは WithHTTPCallerTimeout が優先される？
+			}),
+			probinghttp.WithHTTPCallerTimeout(timeout),
+			probinghttp.WithHTTPCallerMethod(http.MethodGet),
+			probinghttp.WithHTTPCallerOnResp(func(suite *probinghttp.TraceSuite, info *probinghttp.HTTPCallInfo) {
+				responseTime := suite.GetGeneralEnd().Sub(suite.GetGeneralStart()) // おそらく DNS 名前解決時間含む
+				ttfb := suite.GetFirstByteReceived().Sub(suite.GetGeneralStart())  // おそらく DNS 名前解決時間含む
+				attrs := append(baseAttrs2, attribute.Int("status_code", info.StatusCode))
+				r.responseTime.Record(ctx, responseTime.Nanoseconds(), metric.WithAttributes(attrs...))
+				r.ttfb.Record(ctx, ttfb.Nanoseconds(), metric.WithAttributes(attrs...))
+			}),
+			probinghttp.WithHTTPCallerOnConnDone(func(suite *probinghttp.TraceSuite, network, addr string, err error) {
+				if err != nil {
+					// http.Client Do の err != nil が多く、ここにはほとんど来ず、Logger.Errorf() に来る？
+					attrs := append(baseAttrs2, attrReasonUnknown)
+					r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
+					r.l.Warn("failed to connect", zap.Error(err))
+				}
+			}),
+		)
+		httpCaller.RunWithContext(ctx)
+	}
+}
+
+type logger struct {
+	l         *zap.Logger
+	r         *Runner
+	baseAttrs []attribute.KeyValue
+}
+
+func convertToFields(args []interface{}) []zapcore.Field {
+	fields := make([]zapcore.Field, len(args))
+	for i, arg := range args {
+		fields[i] = zap.Any("", arg)
+	}
+	return fields
+}
+
+func NewLogger(l *zap.Logger, r *Runner, baseAttrs []attribute.KeyValue) probing.Logger {
+	return &logger{
+		l:         l,
+		r:         r,
+		baseAttrs: baseAttrs,
+	}
+}
+
+func (l *logger) Debugf(format string, args ...interface{}) {
+	l.l.Debug(format, convertToFields(args)...)
+}
+
+func (l *logger) Errorf(format string, args ...interface{}) {
+	// https://github.com/prometheus-community/pro-bing/blob/v0.4.1/http.go#L400-L402
+	// http.Client{} の Do() で Connection refused などが発生すると、probing の callback では取れず、
+	// このロガーで取るしかないので、ここでやる
+
+	ctx := context.Background()
+	isOtelFailedHandled := false
+
+	if len(args) > 0 {
+		if urlErr, ok := args[0].(*url.Error); ok {
+			if opErr, ok := urlErr.Err.(*net.OpError); ok {
+				if syscallErr, ok := opErr.Err.(*os.SyscallError); ok {
+					if syscallErr.Err == syscall.ECONNREFUSED {
+						attrs := append(l.baseAttrs, attrReasonConnectionRefused)
+						l.r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
+						isOtelFailedHandled = true
+					}
+				}
 			}
-			attrs = append(attrs, baseAttrs...)
-			r.responseTime.Record(ctx, responseTime.Nanoseconds(), metric.WithAttributes(attrs...))
-			r.ttfb.Record(ctx, ttfb.Nanoseconds(), metric.WithAttributes(attrs...))
-		}),
-		probing.WithHTTPCallerOnConnDone(func(suite *probing.TraceSuite, network, addr string, err error) {
-			if err != nil {
-				attrs := append(baseAttrs, attrResonUnknown)
-				r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
-				r.l.Warn("failed to connect", zap.Error(err))
-			}
-		}),
-	)
-	httpCaller.RunWithContext(ctx)
+		}
+	}
+
+	if !isOtelFailedHandled {
+		attrs := append(l.baseAttrs, attrReasonUnknown)
+		l.r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
+
+	l.l.Error(format, convertToFields(args)...)
+}
+
+func (l *logger) Fatalf(format string, args ...interface{}) {
+	// Fatal で exit されると困るので warn に落とす
+	l.l.Warn(format, convertToFields(args)...)
+}
+
+func (l *logger) Infof(format string, args ...interface{}) {
+	l.l.Info(format, convertToFields(args)...)
+}
+
+func (l *logger) Warnf(format string, args ...interface{}) {
+	l.l.Warn(format, convertToFields(args)...)
 }

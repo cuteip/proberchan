@@ -11,11 +11,8 @@ import (
 
 	configpb "github.com/cuteip/proberchan/gen/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
-<<<<<<< HEAD
 	"github.com/cuteip/proberchan/otelconst"
-=======
 	"github.com/miekg/dns"
->>>>>>> probe-ip-version-split
 	probing "github.com/prometheus-community/pro-bing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -106,21 +103,12 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 			if err == nil {
 				dstIPAddrs = []netip.Addr{targetIPAddr}
 			} else {
-<<<<<<< HEAD
-				// target が IP アドレスでない場合は DNS クエリを投げて解決する
-				ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target))
-				if err != nil {
-					r.l.Warn("failed to resolve IP address", zap.Error(err))
-					attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
-					r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
-					return
-=======
 				// target が IP アドレスでない場合は FQDN（末尾ドット有無は曖昧）とみなして名前解決する
 				for _, ipv := range conf.ResolveIpVersions {
 					// 名前解決に失敗しても、もう一方の IP バージョン側で成功する可能性があるので、continue で継続
 					switch ipv {
 					case 4:
-						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, mustQnameSuffixDot(target), dns.Type(dns.TypeA))
+						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target), dns.Type(dns.TypeA))
 						if err != nil {
 							r.l.Warn("failed to resolve IPv4 address", zap.Error(err))
 							attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
@@ -129,7 +117,7 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 						}
 						dstIPAddrs = append(dstIPAddrs, ips...)
 					case 6:
-						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, mustQnameSuffixDot(target), dns.Type(dns.TypeAAAA))
+						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target), dns.Type(dns.TypeAAAA))
 						if err != nil {
 							r.l.Warn("failed to resolve IPv6 address", zap.Error(err))
 							attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
@@ -140,7 +128,6 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 					default:
 						r.l.Warn("unknown IP version", zap.Int32("ip_version", ipv))
 					}
->>>>>>> probe-ip-version-split
 				}
 			}
 			// とりあえずは逐次で ping する

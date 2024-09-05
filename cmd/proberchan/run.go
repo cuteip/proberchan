@@ -80,7 +80,7 @@ func run(cmd *cobra.Command, _ []string) error {
 	for _, confProber := range conf.GetProbes() {
 		switch confProber.Type {
 		case configpb.ProberConfig_PING:
-			err = proberPing.ValidateConfig(conf.Probe.GetPingProbe())
+			err = proberPing.ValidateConfig(confProber.GetPingProbe())
 			if err != nil {
 				return errors.Wrapf(err, "failed to validate ping probe config")
 			}
@@ -93,6 +93,10 @@ func run(cmd *cobra.Command, _ []string) error {
 				}
 			}(confProber)
 		case configpb.ProberConfig_HTTP:
+			err = proberHTTP.ValidateConfig(confProber.GetHttpProbe())
+			if err != nil {
+				return errors.Wrapf(err, "failed to validate http probe config")
+			}
 			wg.Add(1)
 			go func(confProber *configpb.ProberConfig) {
 				defer wg.Done()
