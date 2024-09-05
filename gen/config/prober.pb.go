@@ -156,7 +156,7 @@ type ProberConfig_PingProbe struct {
 }
 
 type ProberConfig_HttpProbe struct {
-	HttpProbe *HttpConfig `protobuf:"bytes,101,opt,name=http_probe,json=httpProbe,proto3,oneof"`
+	HttpProbe *HttpConfig `protobuf:"bytes,101,opt,name=http_probe,json=httpProbe,proto3,oneof"` // proberchan.probes.https.HttpsConfig https_probe = 102;
 }
 
 func (*ProberConfig_PingProbe) isProberConfig_Probe() {}

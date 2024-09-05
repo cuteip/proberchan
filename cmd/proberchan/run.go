@@ -66,13 +66,7 @@ func run(cmd *cobra.Command, _ []string) error {
 		return errors.Wrapf(err, "failed to parse resolver address. must be '<ip_address>:<port>': %s", dnsResolverIPAddrPortStr)
 	}
 
-	disableIPv4Target := conf.GetDisableIpv4Target()
-	disableIPv6Target := conf.GetDisableIpv6Target()
-	if disableIPv4Target && disableIPv6Target {
-		return errors.New("either IPv4 or IPv6 must be enabled")
-	}
-
-	dnsRunner := dnsutil.New(dnsResolverIPAddrPortStr, disableIPv4Target, disableIPv6Target)
+	dnsRunner := dnsutil.New(dnsResolverIPAddrPortStr)
 	proberPing, err := probeping.New(l, dnsRunner)
 	if err != nil {
 		return err
@@ -86,6 +80,10 @@ func run(cmd *cobra.Command, _ []string) error {
 	for _, confProber := range conf.GetProbes() {
 		switch confProber.Type {
 		case configpb.ProberConfig_PING:
+			err = proberPing.ValidateConfig(conf.Probe.GetPingProbe())
+			if err != nil {
+				return errors.Wrapf(err, "failed to validate ping probe config")
+			}
 			wg.Add(1)
 			go func(confProber *configpb.ProberConfig) {
 				defer wg.Done()
