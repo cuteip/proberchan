@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package proberchan.probes.http;
+
+option go_package = "github.com/cuteip/proberchan/config";
+
+message HttpConfig {
+    // URL
+    // IPv4 Address / IPv6 Address / FQDN / with port
+    // "http://192.0.2.1", "http://2001:db8::1/health", "http://target1.example.com/ping", "http://target2.example.com:8080" ...
+    // FQDN 指定されたときは、それで解決できるすべての IP アドレスに対して接続**しない**
+    repeated string targets = 1;
+
+    int32 interval_ms = 2;
+    int32 timeout_ms = 3;
+}

@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"sync"
 	"time"
 
 	configpb "github.com/cuteip/proberchan/gen/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
-	"github.com/cuteip/proberchan/probers/ping"
+	probehttp "github.com/cuteip/proberchan/probers/http"
+	probeping "github.com/cuteip/proberchan/probers/ping"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -71,18 +73,39 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 
 	dnsRunner := dnsutil.New(dnsResolverIPAddrPortStr, disableIPv4Target, disableIPv6Target)
-	proberPing, err := ping.New(l, dnsRunner)
+	proberPing, err := probeping.New(l, dnsRunner)
 	if err != nil {
 		return err
 	}
-	switch conf.GetProbe().Type {
-	case configpb.ProberConfig_PING:
-		err = proberPing.ProbeTickerLoop(ctx, conf.Probe.GetPingProbe())
-		if err != nil {
-			return err
-		}
+	proberHTTP, err := probehttp.New(l, dnsRunner)
+	if err != nil {
+		return err
 	}
 
+	var wg sync.WaitGroup
+	for _, confProber := range conf.GetProbes() {
+		switch confProber.Type {
+		case configpb.ProberConfig_PING:
+			wg.Add(1)
+			go func(confProber *configpb.ProberConfig) {
+				defer wg.Done()
+				err = proberPing.ProbeTickerLoop(ctx, confProber.GetPingProbe())
+				if err != nil {
+					l.Warn("failed to probe", zap.Error(err))
+				}
+			}(confProber)
+		case configpb.ProberConfig_HTTP:
+			wg.Add(1)
+			go func(confProber *configpb.ProberConfig) {
+				defer wg.Done()
+				err = proberHTTP.ProbeTickerLoop(ctx, confProber.GetHttpProbe())
+				if err != nil {
+					l.Warn("failed to probe", zap.Error(err))
+				}
+			}(confProber)
+		}
+	}
+	wg.Wait()
 	return nil
 }
 
@@ -116,24 +139,11 @@ func initMeterProvider(ctx context.Context) (func(context.Context) error, error)
 		return nil, err
 	}
 
-	viewExponentialHistogram := sdkmetric.NewView(
-		sdkmetric.Instrument{
-			Name: "*_latency",
-		},
-		sdkmetric.Stream{
-			Aggregation: sdkmetric.AggregationBase2ExponentialHistogram{
-				MaxSize:  160,
-				MaxScale: 20,
-			},
-			// Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
-			// 	// nanoseconds
-			// 	Boundaries: []float64{1e6, 2e6, 5e6, 10e6, 20e6, 50e6, 100e6, 200e6, 500e6, 1000e6},
-			// },
-		},
-	)
-
+	var views []sdkmetric.View
+	views = append(views, probeping.ViewExponentialHistograms...)
+	views = append(views, probehttp.ViewExponentialHistograms...)
 	mprovider := sdkmetric.NewMeterProvider(
-		sdkmetric.WithView(viewExponentialHistogram),
+		sdkmetric.WithView(views...),
 		sdkmetric.WithReader(readerOtlpHTTP),
 		sdkmetric.WithReader(readerStdout),
 		sdkmetric.WithReader(readerProm), // experimental

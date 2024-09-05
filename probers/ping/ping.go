@@ -1,4 +1,4 @@
-package ping
+package probeping
 
 import (
 	"context"
@@ -6,25 +6,30 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
 	"time"
 
 	configpb "github.com/cuteip/proberchan/gen/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
+	"github.com/cuteip/proberchan/otelconst"
 	probing "github.com/prometheus-community/pro-bing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/zap"
 )
 
 var (
 	defaultTimeout = 1 * time.Second
 
-	attrResonFailedToResolveIPAddr = attribute.String("reason", "failed to resolve IP address")
+	attrResonFailedToResolveIPAddr = attribute.String("reason", "failed to resolve ip address")
 	attrPingTimeout                = attribute.String("reason", "ping timeout")
 	attrResonUnknown               = attribute.String("reason", "unknown")
+
+	ViewExponentialHistograms = []sdkmetric.View{
+		sdkmetric.NewView(sdkmetric.Instrument{Name: "ping_latency"}, otelconst.ExponentialHistogramStream),
+	}
 )
 
 type Runner struct {
@@ -88,7 +93,7 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 				dstIPAddrs = []netip.Addr{targetIPAddr}
 			} else {
 				// target が IP アドレスでない場合は DNS クエリを投げて解決する
-				ips, err := r.dns.ResolveIPAddrByQNAME(ctx, mustQnameSuffixDot(target))
+				ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target))
 				if err != nil {
 					r.l.Warn("failed to resolve IP address", zap.Error(err))
 					attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
@@ -157,11 +162,4 @@ func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *configpb.PingConfig, i
 	// count は 1 だから min, max, avg もどれも同じになる
 	r.latency.Record(ctx, stats.MaxRtt.Nanoseconds(), metric.WithAttributes(attrs...))
 	return nil
-}
-
-func mustQnameSuffixDot(input string) string {
-	if !strings.HasSuffix(input, ".") {
-		return fmt.Sprintf("%s.", input)
-	}
-	return input
 }

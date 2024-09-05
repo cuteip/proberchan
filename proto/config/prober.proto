@@ -3,6 +3,7 @@ syntax = "proto3";
 package proberchan.prober;
 
 import "config/ping.proto";
+import "config/http.proto";
 
 option go_package = "github.com/cuteip/proberchan/config";
 
@@ -11,10 +12,14 @@ message ProberConfig {
 
     enum Type {
         PING = 0;
+        HTTP = 1;
+        // HTTPS = 2;
     }
     Type type = 2;
 
     oneof probe {
-        proberchan.probes.ping.PingConfig ping_probe = 3;
+        proberchan.probes.ping.PingConfig ping_probe = 100;
+        proberchan.probes.http.HttpConfig http_probe = 101;
+        // proberchan.probes.https.HttpsConfig https_probe = 102;
     }
 }

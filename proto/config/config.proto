@@ -19,5 +19,5 @@ message ConfigRoot {
     bool disable_ipv6_target = 3;
 
 
-    proberchan.prober.ProberConfig probe = 101;
+    repeated proberchan.prober.ProberConfig probes = 101;
 }

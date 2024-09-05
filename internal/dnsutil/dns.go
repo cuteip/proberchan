@@ -2,7 +2,9 @@ package dnsutil
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -65,4 +67,11 @@ func (r *Runner) ResolveIPAddrByQNAME(ctx context.Context, qname string) ([]neti
 		}
 	}
 	return ansIPAddr, nil
+}
+
+func MustQnameSuffixDot(input string) string {
+	if !strings.HasSuffix(input, ".") {
+		return fmt.Sprintf("%s.", input)
+	}
+	return input
 }
