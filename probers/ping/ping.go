@@ -58,6 +58,16 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 	}, nil
 }
 
+func (r *Runner) ValidateConfig(conf *configpb.PingConfig) error {
+	if len(conf.GetTargets()) == 0 {
+		return errors.New("no targets. at least one target is required")
+	}
+	if len(conf.GetResolveIpVersions()) == 0 {
+		return errors.New("no resolve_ip_versions. at least one resolve_ip_versions is required")
+	}
+	return nil
+}
+
 func (r *Runner) ProbeTickerLoop(ctx context.Context, conf *configpb.PingConfig) error {
 	interval := time.Duration(conf.GetIntervalMs()) * time.Millisecond
 	ticker := time.NewTicker(interval)

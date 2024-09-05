@@ -71,6 +71,10 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 	switch conf.GetProbe().Type {
 	case configpb.ProberConfig_PING:
+		err = proberPing.ValidateConfig(conf.Probe.GetPingProbe())
+		if err != nil {
+			return errors.Wrapf(err, "failed to validate ping probe config")
+		}
 		err = proberPing.ProbeTickerLoop(ctx, conf.Probe.GetPingProbe())
 		if err != nil {
 			return err
