@@ -12,12 +12,5 @@ message ConfigRoot {
     // 例："192.0.2.1:53"
     string dns_resolver = 1;
 
-    // デフォルトでは IPv4 / IPv6 デュアルスタック環境とみなして動作する
-    // IPv4 への到達性が無ければ disable_ipv4_target = true にする
-    bool disable_ipv4_target = 2;
-    // IPv6 への到達性が無ければ disable_ipv6_target = true にする
-    bool disable_ipv6_target = 3;
-
-
     proberchan.prober.ProberConfig probe = 101;
 }
