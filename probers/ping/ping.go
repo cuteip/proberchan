@@ -149,6 +149,9 @@ func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *configpb.PingConfig, i
 	if conf.GetDf() {
 		pinger.SetDoNotFragment(true)
 	}
+	if conf.GetSize() > 0 {
+		pinger.Size = int(conf.GetSize())
+	}
 
 	// pinger.Timeout にセットするとタイムアウトになったかどうかを判定できないので、
 	// context に WithTimeout でセットしてそれで判定する
