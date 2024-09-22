@@ -193,6 +193,8 @@ func newCustomTransport(dialNetwork string, userAgent string) http.RoundTripper 
 	dt.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
 		return net.Dial(dialNetwork, addr)
 	}
+	// interval おきに毎度新規に TCP コネクションを確立させたいので
+	dt.DisableKeepAlives = true
 	return &customTransport{
 		transport: dt,
 		userAgent: userAgent,
