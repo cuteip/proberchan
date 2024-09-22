@@ -179,6 +179,7 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 			}),
 		)
 		httpCaller.RunWithContext(ctx)
+		httpCaller.Stop()
 	}
 }
 

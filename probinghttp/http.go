@@ -368,25 +368,8 @@ func (c *HTTPCaller) run(ctx context.Context) {
 	c.doneWg.Wait()
 }
 
-func (c *HTTPCaller) runWorkScheduler(ctx context.Context) {
-	c.doneWg.Add(1)
-	go func() {
-		defer c.doneWg.Done()
-
-		ticker := time.NewTicker(c.callFrequency)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				c.workChan <- struct{}{}
-			case <-ctx.Done():
-				return
-			case <-c.doneChan:
-				return
-			}
-		}
-	}()
+func (c *HTTPCaller) runWorkScheduler(_ context.Context) {
+	c.workChan <- struct{}{}
 }
 
 func (c *HTTPCaller) runCallers(ctx context.Context) {
