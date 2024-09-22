@@ -159,6 +159,10 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 			probinghttp.WithHTTPCallerClient(&http.Client{
 				Transport: newCustomTransport(ipv.network, userAgent),
 				// timeout などは WithHTTPCallerTimeout が優先される？
+				// リダイレクト先を追わない
+				CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
 			}),
 			probinghttp.WithHTTPCallerTimeout(timeout),
 			probinghttp.WithHTTPCallerMethod(http.MethodGet),
