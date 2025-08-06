@@ -43,6 +43,7 @@ type Runner struct {
 	dns          *dnsutil.Runner
 	responseTime metric.Int64Histogram
 	ttfb         metric.Int64Histogram
+	attempts     metric.Int64Counter
 	failed       metric.Int64Counter
 }
 
@@ -61,6 +62,12 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
+	attemptsCounter, err := otel.Meter("proberchan").Int64Counter("http_attempts",
+		metric.WithDescription("Total number of http probe attempts"),
+	)
+	if err != nil {
+		return nil, err
+	}
 	failedCounter, err := otel.Meter("proberchan").Int64Counter("http_failed",
 		metric.WithDescription("Total number of failed http probes"),
 		// 失敗理由は "reason" につける
@@ -73,6 +80,7 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 		dns:          dns,
 		responseTime: responseTime,
 		ttfb:         ttfb,
+		attempts:     attemptsCounter,
 		failed:       failedCounter,
 	}, nil
 }
@@ -182,6 +190,7 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 				}
 			}),
 		)
+		r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttrs2...))
 		httpCaller.RunWithContext(ctx)
 		httpCaller.Stop()
 	}

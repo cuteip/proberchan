@@ -34,16 +34,23 @@ var (
 )
 
 type Runner struct {
-	l       *zap.Logger
-	dns     *dnsutil.Runner
-	latency metric.Int64Histogram
-	failed  metric.Int64Counter
+	l        *zap.Logger
+	dns      *dnsutil.Runner
+	latency  metric.Int64Histogram
+	attempts metric.Int64Counter
+	failed   metric.Int64Counter
 }
 
 func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 	latencyHist, err := otel.Meter("proberchan").Int64Histogram("ping_latency",
 		metric.WithUnit("ns"),
 		metric.WithDescription("Latency (RTT) of ping probes"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	attemptsCounter, err := otel.Meter("proberchan").Int64Counter("ping_attempts",
+		metric.WithDescription("Total number of ping probe attempts"),
 	)
 	if err != nil {
 		return nil, err
@@ -56,10 +63,11 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 		return nil, err
 	}
 	return &Runner{
-		l:       l,
-		dns:     dns,
-		latency: latencyHist,
-		failed:  failedCounter,
+		l:        l,
+		dns:      dns,
+		latency:  latencyHist,
+		attempts: attemptsCounter,
+		failed:   failedCounter,
 	}, nil
 }
 
@@ -103,6 +111,7 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 			if err == nil {
 				dstIPAddrs = []netip.Addr{targetIPAddr}
 			} else {
+				r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 				// target が IP アドレスでない場合は FQDN（末尾ドット有無は曖昧）とみなして名前解決する
 				for _, ipv := range conf.ResolveIpVersions {
 					// 名前解決に失敗しても、もう一方の IP バージョン側で成功する可能性があるので、continue で継続
