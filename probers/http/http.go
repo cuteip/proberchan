@@ -95,7 +95,7 @@ func (r *Runner) ValidateConfig(conf *configpb.HttpConfig) error {
 	return nil
 }
 
-func (r *Runner) ProbeTickerLoop(ctx context.Context, conf *configpb.HttpConfig) error {
+func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *configpb.HttpConfig) error {
 	interval := time.Duration(conf.GetIntervalMs()) * time.Millisecond
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -104,12 +104,12 @@ func (r *Runner) ProbeTickerLoop(ctx context.Context, conf *configpb.HttpConfig)
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			go r.Probe(ctx, conf)
+			go r.Probe(ctx, name, conf)
 		}
 	}
 }
 
-func (r *Runner) Probe(ctx context.Context, conf *configpb.HttpConfig) {
+func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.HttpConfig) {
 	var wg sync.WaitGroup
 	for _, target := range conf.GetTargets() {
 		wg.Add(1)
@@ -122,8 +122,10 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.HttpConfig) {
 				return
 			}
 			baseAttr := []attribute.KeyValue{
+				attribute.String("name", name),
 				attribute.String("target", target),
 			}
+			r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 			r.ProbeByTarget(ctx, conf, targetURL, baseAttr)
 		}(target)
 	}
@@ -190,7 +192,6 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 				}
 			}),
 		)
-		r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttrs2...))
 		httpCaller.RunWithContext(ctx)
 		httpCaller.Stop()
 	}

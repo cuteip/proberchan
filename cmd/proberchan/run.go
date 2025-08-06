@@ -87,7 +87,7 @@ func run(cmd *cobra.Command, _ []string) error {
 			wg.Add(1)
 			go func(confProber *configpb.ProberConfig) {
 				defer wg.Done()
-				err = proberPing.ProbeTickerLoop(ctx, confProber.GetPingProbe())
+				err = proberPing.ProbeTickerLoop(ctx, confProber.GetName(), confProber.GetPingProbe())
 				if err != nil {
 					l.Warn("failed to probe", zap.Error(err))
 				}
@@ -100,7 +100,7 @@ func run(cmd *cobra.Command, _ []string) error {
 			wg.Add(1)
 			go func(confProber *configpb.ProberConfig) {
 				defer wg.Done()
-				err = proberHTTP.ProbeTickerLoop(ctx, confProber.GetHttpProbe())
+				err = proberHTTP.ProbeTickerLoop(ctx, confProber.GetName(), confProber.GetHttpProbe())
 				if err != nil {
 					l.Warn("failed to probe", zap.Error(err))
 				}

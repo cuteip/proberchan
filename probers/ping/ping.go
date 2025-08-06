@@ -81,7 +81,7 @@ func (r *Runner) ValidateConfig(conf *configpb.PingConfig) error {
 	return nil
 }
 
-func (r *Runner) ProbeTickerLoop(ctx context.Context, conf *configpb.PingConfig) error {
+func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *configpb.PingConfig) error {
 	interval := time.Duration(conf.GetIntervalMs()) * time.Millisecond
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -90,20 +90,22 @@ func (r *Runner) ProbeTickerLoop(ctx context.Context, conf *configpb.PingConfig)
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			go r.Probe(ctx, conf)
+			go r.Probe(ctx, name, conf)
 		}
 	}
 }
 
-func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
+func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.PingConfig) {
 	var wg sync.WaitGroup
 	for _, target := range conf.GetTargets() {
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
 			baseAttr := []attribute.KeyValue{
+				attribute.String("probe", name),
 				attribute.String("target", target),
 			}
+			r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 			// target は config に書かれた "targets" の文字列そのまま
 			// めっちゃややこしい
 			var dstIPAddrs []netip.Addr // 実際に ping する宛先 IP アドレス
@@ -111,7 +113,6 @@ func (r *Runner) Probe(ctx context.Context, conf *configpb.PingConfig) {
 			if err == nil {
 				dstIPAddrs = []netip.Addr{targetIPAddr}
 			} else {
-				r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 				// target が IP アドレスでない場合は FQDN（末尾ドット有無は曖昧）とみなして名前解決する
 				for _, ipv := range conf.ResolveIpVersions {
 					// 名前解決に失敗しても、もう一方の IP バージョン側で成功する可能性があるので、continue で継続
