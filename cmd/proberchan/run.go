@@ -8,7 +8,6 @@ import (
 	"net/netip"
 	"os"
 	"sync"
-	"time"
 
 	configpb "github.com/cuteip/proberchan/gen/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
@@ -112,23 +111,17 @@ func run(cmd *cobra.Command, _ []string) error {
 }
 
 func initMeterProvider(ctx context.Context) (func(context.Context) error, error) {
-	exportInterval := 10 * time.Second
-
 	expOtlpHTTP, err := otlpmetrichttp.New(ctx)
 	if err != nil {
 		return nil, err
 	}
-	readerOtlpHTTP := sdkmetric.NewPeriodicReader(expOtlpHTTP,
-		sdkmetric.WithInterval(exportInterval),
-	)
+	readerOtlpHTTP := sdkmetric.NewPeriodicReader(expOtlpHTTP)
 
 	expStdout, err := stdoutmetric.New()
 	if err != nil {
 		return nil, err
 	}
-	readerStdout := sdkmetric.NewPeriodicReader(expStdout,
-		sdkmetric.WithInterval(exportInterval),
-	)
+	readerStdout := sdkmetric.NewPeriodicReader(expStdout)
 
 	readerProm, err := newPromExporter()
 	if err != nil {
