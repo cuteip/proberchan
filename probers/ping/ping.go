@@ -97,15 +97,13 @@ func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *configp
 
 func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.PingConfig) {
 	var wg sync.WaitGroup
+	baseAttr := []attribute.KeyValue{attribute.String("probe", name)}
+	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 	for _, target := range conf.GetTargets() {
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
-			baseAttr := []attribute.KeyValue{
-				attribute.String("probe", name),
-				attribute.String("target", target),
-			}
-			r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
+			baseAttr := append(baseAttr, attribute.String("target", target))
 			// target は config に書かれた "targets" の文字列そのまま
 			// めっちゃややこしい
 			var dstIPAddrs []netip.Addr // 実際に ping する宛先 IP アドレス

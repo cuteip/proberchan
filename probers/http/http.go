@@ -111,6 +111,8 @@ func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *configp
 
 func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.HttpConfig) {
 	var wg sync.WaitGroup
+	baseAttr := []attribute.KeyValue{attribute.String("name", name)}
+	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 	for _, target := range conf.GetTargets() {
 		wg.Add(1)
 		go func(target string) {
@@ -121,11 +123,7 @@ func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.HttpConf
 				r.l.Warn("failed to parse URL", zap.Error(err))
 				return
 			}
-			baseAttr := []attribute.KeyValue{
-				attribute.String("name", name),
-				attribute.String("target", target),
-			}
-			r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
+			baseAttr := append(baseAttr, attribute.String("target", targetURL.String()))
 			r.ProbeByTarget(ctx, conf, targetURL, baseAttr)
 		}(target)
 	}
