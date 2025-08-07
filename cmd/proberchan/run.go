@@ -20,7 +20,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/prometheus"
-	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.uber.org/zap"
@@ -117,11 +116,11 @@ func initMeterProvider(ctx context.Context) (func(context.Context) error, error)
 	}
 	readerOtlpHTTP := sdkmetric.NewPeriodicReader(expOtlpHTTP)
 
-	expStdout, err := stdoutmetric.New()
-	if err != nil {
-		return nil, err
-	}
-	readerStdout := sdkmetric.NewPeriodicReader(expStdout)
+	// expStdout, err := stdoutmetric.New()
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// readerStdout := sdkmetric.NewPeriodicReader(expStdout)
 
 	readerProm, err := newPromExporter()
 	if err != nil {
@@ -140,7 +139,7 @@ func initMeterProvider(ctx context.Context) (func(context.Context) error, error)
 	mprovider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithView(views...),
 		sdkmetric.WithReader(readerOtlpHTTP),
-		sdkmetric.WithReader(readerStdout),
+		// sdkmetric.WithReader(readerStdout),
 		sdkmetric.WithReader(readerProm), // experimental
 		sdkmetric.WithResource(res),
 	)
