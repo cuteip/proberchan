@@ -6,10 +6,13 @@ import (
 	"log"
 	"net/http"
 	"net/netip"
-	"sync"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
+	"github.com/cuteip/proberchan/probers"
 	probehttp "github.com/cuteip/proberchan/probers/http"
 	probeping "github.com/cuteip/proberchan/probers/ping"
 	"github.com/pkg/errors"
@@ -42,14 +45,15 @@ func run(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	ctx := cmd.Context()
-	shutdownMeterProvider, err := initMeterProvider(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	shutdownMeterProvider, err := initMeterProvider(ctx)
 	if err != nil {
 		return err
 	}
 	defer shutdownMeterProvider(ctx)
 
-	conf, err := loadConfig(viper.GetString(configKey))
+	configPath := viper.GetString(configKey)
+	conf, err := config.LoadFromFile(configPath)
 	if err != nil {
 		return err
 	}
@@ -67,39 +71,115 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 
 	dnsRunner := dnsutil.New(dnsResolverIPAddrPortStr)
-	proberPing, err := probeping.New(l, dnsRunner)
-	if err != nil {
-		return err
-	}
-	proberHTTP, err := probehttp.New(l, dnsRunner)
-	if err != nil {
-		return err
-	}
 
-	var wg sync.WaitGroup
-	for _, confProber := range conf.Probes {
-		switch confProber.Type {
+	runningProbers := probers.NewRunningProbers()
+	for _, probe := range conf.Probes {
+		switch probe.Type {
 		case "ping":
-			wg.Add(1)
-			go func(confProber config.ProbeConfig) {
-				defer wg.Done()
-				err = proberPing.ProbeTickerLoop(ctx, confProber.Name, confProber.Ping)
-				if err != nil {
-					l.Warn("failed to probe", zap.Error(err))
-				}
-			}(confProber)
+			l.Debug("starting ping prober", zap.String("name", probe.Name))
+			prober, err := probeping.New(l, dnsRunner, probe.Name)
+			if err != nil {
+				return err
+			}
+			prober.SetConfig(probe.Ping)
+			prober.Start(ctx)
+			runningProbers.AddPing(probe.Name, prober)
 		case "http":
-			wg.Add(1)
-			go func(confProber config.ProbeConfig) {
-				defer wg.Done()
-				err = proberHTTP.ProbeTickerLoop(ctx, confProber.Name, confProber.HTTP)
-				if err != nil {
-					l.Warn("failed to probe", zap.Error(err))
-				}
-			}(confProber)
+			l.Debug("starting http prober", zap.String("name", probe.Name))
+			prober, err := probehttp.New(l, dnsRunner, probe.Name)
+			if err != nil {
+				return err
+			}
+			prober.SetConfig(probe.HTTP)
+			prober.Start(ctx)
+			runningProbers.AddHTTP(probe.Name, prober)
 		}
 	}
-	wg.Wait()
+
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-term
+		l.Info("sigterm signal received. shutdown ...")
+		cancel()
+	}()
+
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for {
+			<-hup
+			l.Info("sighup signal received. reload ...")
+			newConf, err := config.LoadFromFile(configPath)
+			if err != nil {
+				l.Warn("config.LoadFromFile() failed", zap.Error(err))
+			}
+
+			if err := newConf.Validate(); err != nil {
+				l.Warn("newConf.Validate() failed", zap.Error(err))
+				continue
+			}
+
+			// remove (stop)
+			for _, curProbe := range conf.Probes {
+				_, exist := newConf.GetProbe(curProbe.Name)
+				if !exist {
+					switch curProbe.Type {
+					case "ping":
+						l.Info("stop ping prober", zap.String("name", curProbe.Name))
+						runningProbers.RemovePing(curProbe.Name)
+					case "http":
+						l.Info("stop http prober", zap.String("name", curProbe.Name))
+						runningProbers.RemoveHTTP(curProbe.Name)
+					}
+				}
+			}
+
+			// add (start) or update
+			for _, newConfProbe := range newConf.Probes {
+				switch newConfProbe.Type {
+				case "ping":
+					prober, exist := runningProbers.GetPing(newConfProbe.Name)
+					if exist {
+						l.Info("update ping probe", zap.String("name", newConfProbe.Name))
+						prober.SetConfig(newConfProbe.Ping)
+					} else {
+						l.Info("start ping probe", zap.String("name", newConfProbe.Name))
+						prober, err := probeping.New(l, dnsRunner, newConfProbe.Name)
+						if err != nil {
+							l.Warn("failed to create new ping prober", zap.Error(err))
+							continue
+						}
+						prober.SetConfig(newConfProbe.Ping)
+						prober.Start(ctx)
+						runningProbers.AddPing(newConfProbe.Name, prober)
+					}
+				case "http":
+					prober, exist := runningProbers.GetHTTP(newConfProbe.Name)
+					if exist {
+						l.Info("update http probe", zap.String("name", newConfProbe.Name))
+						prober.SetConfig(newConfProbe.HTTP)
+					} else {
+						l.Info("start new http probe", zap.String("name", newConfProbe.Name))
+						prober, err := probehttp.New(l, dnsRunner, newConfProbe.Name)
+						if err != nil {
+							l.Warn("failed to create new http prober", zap.Error(err))
+							continue
+						}
+						prober.SetConfig(newConfProbe.HTTP)
+						prober.Start(ctx)
+						runningProbers.AddHTTP(newConfProbe.Name, prober)
+					}
+				}
+			}
+
+			conf = newConf
+			l.Info("reload done")
+		}
+	}()
+
+	<-ctx.Done()
+	l.Info("context canceled")
 	return nil
 }
 
@@ -153,8 +233,4 @@ func serveMetrics() {
 		fmt.Printf("error serving http: %v", err)
 		return
 	}
-}
-
-func loadConfig(confPath string) (*config.Config, error) {
-	return config.LoadFromFile(confPath)
 }

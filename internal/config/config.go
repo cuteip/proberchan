@@ -68,6 +68,15 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func (c *Config) GetProbe(name string) (*ProbeConfig, bool) {
+	for _, probe := range c.Probes {
+		if probe.Name == name {
+			return &probe, true
+		}
+	}
+	return nil, false
+}
+
 func (p *ProbeConfig) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("probe name is required")

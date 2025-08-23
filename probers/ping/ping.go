@@ -39,9 +39,18 @@ type Runner struct {
 	latency  metric.Int64Histogram
 	attempts metric.Int64Counter
 	failed   metric.Int64Counter
+
+	name  string
+	state RunnerState
+	stop  chan struct{}
 }
 
-func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
+type RunnerState struct {
+	mu   sync.RWMutex
+	conf *config.PingConfig
+}
+
+func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
 	latencyHist, err := otel.Meter("proberchan").Int64Histogram("ping_latency",
 		metric.WithUnit("ns"),
 		metric.WithDescription("Latency (RTT) of ping probes"),
@@ -68,26 +77,54 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 		latency:  latencyHist,
 		attempts: attemptsCounter,
 		failed:   failedCounter,
+		name:     name,
+		state: RunnerState{
+			mu:   sync.RWMutex{},
+			conf: &config.PingConfig{},
+		},
+		stop: make(chan struct{}),
 	}, nil
 }
 
-func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *config.PingConfig) error {
-	interval := time.Duration(conf.IntervalMs) * time.Millisecond
+func (r *Runner) GetConfig() *config.PingConfig {
+	r.state.mu.RLock()
+	defer r.state.mu.RUnlock()
+	return r.state.conf
+}
+
+func (r *Runner) SetConfig(conf *config.PingConfig) {
+	r.state.mu.Lock()
+	defer r.state.mu.Unlock()
+	r.state.conf = conf
+}
+
+func (r *Runner) Start(ctx context.Context) {
+	go r.ProbeTickerLoop(ctx)
+}
+
+func (r *Runner) Stop() {
+	r.stop <- struct{}{}
+}
+
+func (r *Runner) ProbeTickerLoop(ctx context.Context) {
+	interval := time.Duration(r.GetConfig().IntervalMs) * time.Millisecond
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
+		case <-r.stop:
+			return
 		case <-ticker.C:
-			go r.Probe(ctx, name, conf)
+			go r.probe(ctx, r.GetConfig())
 		}
 	}
 }
 
-func (r *Runner) Probe(ctx context.Context, name string, conf *config.PingConfig) {
+func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 	var wg sync.WaitGroup
-	baseAttr := []attribute.KeyValue{attribute.String("probe", name)}
+	baseAttr := []attribute.KeyValue{attribute.String("probe", r.name)}
 	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 	for _, target := range conf.Targets {
 		wg.Add(1)
@@ -130,7 +167,7 @@ func (r *Runner) Probe(ctx context.Context, name string, conf *config.PingConfig
 			}
 			// とりあえずは逐次で ping する
 			for _, dstIPAddr := range dstIPAddrs {
-				err := r.ProbeByIPAddr(ctx, conf, dstIPAddr, baseAttr)
+				err := r.probeByIPAddr(ctx, conf, dstIPAddr, baseAttr)
 				if err != nil {
 					r.l.Warn("failed to probe", zap.Error(err))
 				}
@@ -140,7 +177,7 @@ func (r *Runner) Probe(ctx context.Context, name string, conf *config.PingConfig
 	wg.Wait()
 }
 
-func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *config.PingConfig, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
+func (r *Runner) probeByIPAddr(ctx context.Context, conf *config.PingConfig, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
 	pinger := probing.New("")
 	pinger.SetIPAddr(&net.IPAddr{IP: ipAddr.AsSlice()})
 	pinger.Count = 1

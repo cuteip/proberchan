@@ -44,9 +44,18 @@ type Runner struct {
 	ttfb         metric.Int64Histogram
 	attempts     metric.Int64Counter
 	failed       metric.Int64Counter
+
+	name  string
+	state RunnerState
+	stop  chan struct{}
 }
 
-func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
+type RunnerState struct {
+	mu   sync.RWMutex
+	conf *config.HTTPConfig
+}
+
+func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
 	responseTime, err := otel.Meter("proberchan").Int64Histogram("http_response_time",
 		metric.WithUnit("ns"),
 		metric.WithDescription("http response time of http probes"),
@@ -81,26 +90,54 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 		ttfb:         ttfb,
 		attempts:     attemptsCounter,
 		failed:       failedCounter,
+		name:         name,
+		state: RunnerState{
+			mu:   sync.RWMutex{},
+			conf: &config.HTTPConfig{},
+		},
+		stop: make(chan struct{}),
 	}, nil
 }
 
-func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *config.HTTPConfig) error {
-	interval := time.Duration(conf.IntervalMs) * time.Millisecond
+func (r *Runner) GetConfig() *config.HTTPConfig {
+	r.state.mu.RLock()
+	defer r.state.mu.RUnlock()
+	return r.state.conf
+}
+
+func (r *Runner) SetConfig(conf *config.HTTPConfig) {
+	r.state.mu.Lock()
+	defer r.state.mu.Unlock()
+	r.state.conf = conf
+}
+
+func (r *Runner) Start(ctx context.Context) {
+	go r.ProbeTickerLoop(ctx)
+}
+
+func (r *Runner) Stop() {
+	r.stop <- struct{}{}
+}
+
+func (r *Runner) ProbeTickerLoop(ctx context.Context) {
+	interval := time.Duration(r.GetConfig().IntervalMs) * time.Millisecond
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
+		case <-r.stop:
+			return
 		case <-ticker.C:
-			go r.Probe(ctx, name, conf)
+			go r.probe(ctx, r.GetConfig())
 		}
 	}
 }
 
-func (r *Runner) Probe(ctx context.Context, name string, conf *config.HTTPConfig) {
+func (r *Runner) probe(ctx context.Context, conf *config.HTTPConfig) {
 	var wg sync.WaitGroup
-	baseAttr := []attribute.KeyValue{attribute.String("name", name)}
+	baseAttr := []attribute.KeyValue{attribute.String("name", r.name)}
 	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 	for _, target := range conf.Targets {
 		wg.Add(1)
@@ -113,13 +150,13 @@ func (r *Runner) Probe(ctx context.Context, name string, conf *config.HTTPConfig
 				return
 			}
 			baseAttr := append(baseAttr, attribute.String("target", targetURL.String()))
-			r.ProbeByTarget(ctx, conf, targetURL, baseAttr)
+			r.probeByTarget(ctx, conf, targetURL, baseAttr)
 		}(target)
 	}
 	wg.Wait()
 }
 
-func (r *Runner) ProbeByTarget(ctx context.Context, conf *config.HTTPConfig, target *url.URL, baseAttrs []attribute.KeyValue) {
+func (r *Runner) probeByTarget(ctx context.Context, conf *config.HTTPConfig, target *url.URL, baseAttrs []attribute.KeyValue) {
 	var timeout time.Duration
 	if conf.TimeoutMs == 0 {
 		timeout = defaultTimeout
