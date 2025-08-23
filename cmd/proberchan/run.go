@@ -6,10 +6,9 @@ import (
 	"log"
 	"net/http"
 	"net/netip"
-	"os"
 	"sync"
 
-	configpb "github.com/cuteip/proberchan/gen/config"
+	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
 	probehttp "github.com/cuteip/proberchan/probers/http"
 	probeping "github.com/cuteip/proberchan/probers/ping"
@@ -24,7 +23,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"google.golang.org/protobuf/encoding/prototext"
 )
 
 func run(cmd *cobra.Command, _ []string) error {
@@ -56,9 +54,13 @@ func run(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	if err := conf.Validate(); err != nil {
+		return errors.Wrap(err, "invalid configuration")
+	}
+
 	l.Sugar().Debugf("config: %+v", conf)
 
-	dnsResolverIPAddrPortStr := conf.GetDnsResolver()
+	dnsResolverIPAddrPortStr := conf.DNSResolver
 	_, err = netip.ParseAddrPort(dnsResolverIPAddrPortStr)
 	if err != nil {
 		return errors.Wrapf(err, "failed to parse resolver address. must be '<ip_address>:<port>': %s", dnsResolverIPAddrPortStr)
@@ -75,30 +77,22 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 
 	var wg sync.WaitGroup
-	for _, confProber := range conf.GetProbes() {
+	for _, confProber := range conf.Probes {
 		switch confProber.Type {
-		case configpb.ProberConfig_PING:
-			err = proberPing.ValidateConfig(confProber.GetPingProbe())
-			if err != nil {
-				return errors.Wrapf(err, "failed to validate ping probe config")
-			}
+		case "ping":
 			wg.Add(1)
-			go func(confProber *configpb.ProberConfig) {
+			go func(confProber config.ProbeConfig) {
 				defer wg.Done()
-				err = proberPing.ProbeTickerLoop(ctx, confProber.GetName(), confProber.GetPingProbe())
+				err = proberPing.ProbeTickerLoop(ctx, confProber.Name, confProber.Ping)
 				if err != nil {
 					l.Warn("failed to probe", zap.Error(err))
 				}
 			}(confProber)
-		case configpb.ProberConfig_HTTP:
-			err = proberHTTP.ValidateConfig(confProber.GetHttpProbe())
-			if err != nil {
-				return errors.Wrapf(err, "failed to validate http probe config")
-			}
+		case "http":
 			wg.Add(1)
-			go func(confProber *configpb.ProberConfig) {
+			go func(confProber config.ProbeConfig) {
 				defer wg.Done()
-				err = proberHTTP.ProbeTickerLoop(ctx, confProber.GetName(), confProber.GetHttpProbe())
+				err = proberHTTP.ProbeTickerLoop(ctx, confProber.Name, confProber.HTTP)
 				if err != nil {
 					l.Warn("failed to probe", zap.Error(err))
 				}
@@ -161,16 +155,6 @@ func serveMetrics() {
 	}
 }
 
-func loadConfig(confPath string) (*configpb.ConfigRoot, error) {
-	c, err := os.ReadFile(confPath)
-	if err != nil {
-		return nil, err
-	}
-
-	pbConfig := configpb.ConfigRoot{}
-	err = prototext.Unmarshal(c, &pbConfig)
-	if err != nil {
-		return nil, err
-	}
-	return &pbConfig, nil
+func loadConfig(confPath string) (*config.Config, error) {
+	return config.LoadFromFile(confPath)
 }

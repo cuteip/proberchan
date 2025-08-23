@@ -36,7 +36,7 @@ func main() {
 	}
 	rootCmd.PersistentFlags().String("perf-listen-addr", "127.0.0.1:6060", "pprof listen address")
 	rootCmd.Flags().String(logLevelKey, "debug", "log level")
-	rootCmd.Flags().String(configKey, "config.cfg", "config file path")
+	rootCmd.Flags().String(configKey, "config.yaml", "config file path")
 
 	viper.SetEnvPrefix("PROBERCHAN")
 	viper.BindPFlags(rootCmd.Flags())

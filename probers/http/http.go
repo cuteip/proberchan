@@ -2,7 +2,6 @@ package probehttp
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -11,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	configpb "github.com/cuteip/proberchan/gen/config"
+	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
 	"github.com/cuteip/proberchan/otelconst"
 	"github.com/cuteip/proberchan/probinghttp"
@@ -85,18 +84,8 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 	}, nil
 }
 
-func (r *Runner) ValidateConfig(conf *configpb.HttpConfig) error {
-	if len(conf.GetTargets()) == 0 {
-		return errors.New("no targets. at least one target is required")
-	}
-	if len(conf.GetResolveIpVersions()) == 0 {
-		return errors.New("no resolve_ip_versions. at least one resolve_ip_versions is required")
-	}
-	return nil
-}
-
-func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *configpb.HttpConfig) error {
-	interval := time.Duration(conf.GetIntervalMs()) * time.Millisecond
+func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *config.HTTPConfig) error {
+	interval := time.Duration(conf.IntervalMs) * time.Millisecond
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -109,11 +98,11 @@ func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *configp
 	}
 }
 
-func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.HttpConfig) {
+func (r *Runner) Probe(ctx context.Context, name string, conf *config.HTTPConfig) {
 	var wg sync.WaitGroup
 	baseAttr := []attribute.KeyValue{attribute.String("name", name)}
 	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
-	for _, target := range conf.GetTargets() {
+	for _, target := range conf.Targets {
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
@@ -130,19 +119,19 @@ func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.HttpConf
 	wg.Wait()
 }
 
-func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, target *url.URL, baseAttrs []attribute.KeyValue) {
+func (r *Runner) ProbeByTarget(ctx context.Context, conf *config.HTTPConfig, target *url.URL, baseAttrs []attribute.KeyValue) {
 	var timeout time.Duration
-	if conf.GetTimeoutMs() == 0 {
+	if conf.TimeoutMs == 0 {
 		timeout = defaultTimeout
 	} else {
-		timeout = time.Duration(conf.GetTimeoutMs()) * time.Millisecond
+		timeout = time.Duration(conf.TimeoutMs) * time.Millisecond
 	}
 
 	var userAgent string
-	if conf.GetUserAgent() == "" {
+	if conf.UserAgent == "" {
 		userAgent = defaultUserAgent
 	} else {
-		userAgent = conf.GetUserAgent()
+		userAgent = conf.UserAgent
 	}
 
 	type ipVersion struct {
@@ -150,14 +139,14 @@ func (r *Runner) ProbeByTarget(ctx context.Context, conf *configpb.HttpConfig, t
 		network string // net.Dial network
 	}
 	ipVersions := []ipVersion{}
-	for _, ipv := range conf.GetResolveIpVersions() {
+	for _, ipv := range conf.ResolveIPVersions {
 		switch ipv {
 		case 4:
 			ipVersions = append(ipVersions, ipVersion{version: 4, network: "tcp4"})
 		case 6:
 			ipVersions = append(ipVersions, ipVersion{version: 6, network: "tcp6"})
 		default:
-			r.l.Warn("unknown resolve_ip_versions", zap.Int32("ip_version", ipv))
+			r.l.Warn("unknown resolve_ip_versions", zap.Int("ip_version", ipv))
 		}
 	}
 	for _, ipv := range ipVersions {

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	configpb "github.com/cuteip/proberchan/gen/config"
+	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
 	"github.com/cuteip/proberchan/otelconst"
 	"github.com/miekg/dns"
@@ -71,18 +71,8 @@ func New(l *zap.Logger, dns *dnsutil.Runner) (*Runner, error) {
 	}, nil
 }
 
-func (r *Runner) ValidateConfig(conf *configpb.PingConfig) error {
-	if len(conf.GetTargets()) == 0 {
-		return errors.New("no targets. at least one target is required")
-	}
-	if len(conf.GetResolveIpVersions()) == 0 {
-		return errors.New("no resolve_ip_versions. at least one resolve_ip_versions is required")
-	}
-	return nil
-}
-
-func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *configpb.PingConfig) error {
-	interval := time.Duration(conf.GetIntervalMs()) * time.Millisecond
+func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *config.PingConfig) error {
+	interval := time.Duration(conf.IntervalMs) * time.Millisecond
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -95,11 +85,11 @@ func (r *Runner) ProbeTickerLoop(ctx context.Context, name string, conf *configp
 	}
 }
 
-func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.PingConfig) {
+func (r *Runner) Probe(ctx context.Context, name string, conf *config.PingConfig) {
 	var wg sync.WaitGroup
 	baseAttr := []attribute.KeyValue{attribute.String("probe", name)}
 	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
-	for _, target := range conf.GetTargets() {
+	for _, target := range conf.Targets {
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
@@ -112,7 +102,7 @@ func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.PingConf
 				dstIPAddrs = []netip.Addr{targetIPAddr}
 			} else {
 				// target が IP アドレスでない場合は FQDN（末尾ドット有無は曖昧）とみなして名前解決する
-				for _, ipv := range conf.ResolveIpVersions {
+				for _, ipv := range conf.ResolveIPVersions {
 					// 名前解決に失敗しても、もう一方の IP バージョン側で成功する可能性があるので、continue で継続
 					switch ipv {
 					case 4:
@@ -134,7 +124,7 @@ func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.PingConf
 						}
 						dstIPAddrs = append(dstIPAddrs, ips...)
 					default:
-						r.l.Warn("unknown IP version", zap.Int32("ip_version", ipv))
+						r.l.Warn("unknown IP version", zap.Int("ip_version", ipv))
 					}
 				}
 			}
@@ -150,25 +140,25 @@ func (r *Runner) Probe(ctx context.Context, name string, conf *configpb.PingConf
 	wg.Wait()
 }
 
-func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *configpb.PingConfig, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
+func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *config.PingConfig, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
 	pinger := probing.New("")
 	pinger.SetIPAddr(&net.IPAddr{IP: ipAddr.AsSlice()})
 	pinger.Count = 1
-	if conf.GetDf() {
+	if conf.DF {
 		pinger.SetDoNotFragment(true)
 	}
-	if conf.GetSize() > 0 {
-		pinger.Size = int(conf.GetSize())
+	if conf.Size > 0 {
+		pinger.Size = int(conf.Size)
 	}
 
 	// pinger.Timeout にセットするとタイムアウトになったかどうかを判定できないので、
 	// context に WithTimeout でセットしてそれで判定する
 	// https://github.com/prometheus-community/pro-bing/issues/70#issuecomment-2307468862
 	var timeout time.Duration
-	if conf.GetTimeoutMs() == 0 {
+	if conf.TimeoutMs == 0 {
 		timeout = defaultTimeout
 	} else {
-		timeout = time.Duration(conf.GetTimeoutMs()) * time.Millisecond
+		timeout = time.Duration(conf.TimeoutMs) * time.Millisecond
 	}
 	pingerCtx, _ := context.WithTimeout(ctx, timeout)
 	r.l.Debug("ping run ...", zap.String("pinger", fmt.Sprintf("%+v", pinger)), zap.Duration("timeout", timeout))
@@ -179,7 +169,7 @@ func (r *Runner) ProbeByIPAddr(ctx context.Context, conf *configpb.PingConfig, i
 
 	attrs := []attribute.KeyValue{
 		attribute.Int("size", pinger.Size),
-		attribute.Bool("df", conf.GetDf()),
+		attribute.Bool("df", conf.DF),
 		attribute.String("ip_address", ipAddr.String()),
 		attribute.Int("ip_version", ipVersion),
 	}

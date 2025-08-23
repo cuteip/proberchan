@@ -1,0 +1,24 @@
+dns_resolver: "192.0.2.1:53"
+
+probes:
+  - name: "ping_v4"
+    type: "ping"
+    ping:
+      targets:
+        - "host1.example"
+        - "host2.example"
+      interval_ms: 500
+      timeout_ms: 1000
+      df: false
+      resolve_ip_versions: [4]
+
+  - name: "http_example"
+    type: "http"
+    http:
+      targets:
+        - "http://host1.example/health"
+        - "http://host2.example:8080/ping"
+      interval_ms: 1000
+      timeout_ms: 5000
+      resolve_ip_versions: [4, 6]
+      user_agent: "proberchan (+https://github.com/cuteip/proberchan)"
