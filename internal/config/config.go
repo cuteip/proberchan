@@ -17,6 +17,7 @@ type ProbeConfig struct {
 	Type string      `yaml:"type"`
 	Ping *PingConfig `yaml:"ping,omitempty"`
 	HTTP *HTTPConfig `yaml:"http,omitempty"`
+	DNS  *DNSConfig  `yaml:"dns,omitempty"`
 }
 
 type PingConfig struct {
@@ -34,6 +35,19 @@ type HTTPConfig struct {
 	TimeoutMs         int      `yaml:"timeout_ms"`
 	ResolveIPVersions []int    `yaml:"resolve_ip_versions"`
 	UserAgent         string   `yaml:"user_agent"`
+}
+
+type DNSConfig struct {
+	Targets           []DNSTarget `yaml:"targets"`
+	IntervalMs        int         `yaml:"interval_ms"`
+	TimeoutMs         int         `yaml:"timeout_ms"`
+	ResolveIPVersions []int       `yaml:"resolve_ip_versions"`
+	FlagRD            bool        `yaml:"flag_rd"`
+}
+type DNSTarget struct {
+	Server string `yaml:"server"`
+	QName  string `yaml:"qname"`
+	QType  string `yaml:"qtype"`
 }
 
 func LoadFromFile(path string) (*Config, error) {
@@ -93,19 +107,24 @@ func (p *ProbeConfig) Validate() error {
 			return fmt.Errorf("http configuration is required for http probe")
 		}
 		return p.HTTP.Validate()
+	case "dns":
+		if p.DNS == nil {
+			return fmt.Errorf("dns configuration is required for dns probe")
+		}
+		return p.DNS.Validate()
 	default:
 		return fmt.Errorf("unsupported probe type: %s", p.Type)
 	}
 }
 
-func (p *PingConfig) Validate() error {
-	if len(p.Targets) == 0 {
+func (c *PingConfig) Validate() error {
+	if len(c.Targets) == 0 {
 		return fmt.Errorf("at least one target is required")
 	}
-	if len(p.ResolveIPVersions) == 0 {
+	if len(c.ResolveIPVersions) == 0 {
 		return fmt.Errorf("at least one resolve_ip_version is required")
 	}
-	for _, version := range p.ResolveIPVersions {
+	for _, version := range c.ResolveIPVersions {
 		if version != 4 && version != 6 {
 			return fmt.Errorf("invalid IP version: %d (must be 4 or 6)", version)
 		}
@@ -113,14 +132,29 @@ func (p *PingConfig) Validate() error {
 	return nil
 }
 
-func (h *HTTPConfig) Validate() error {
-	if len(h.Targets) == 0 {
+func (c *HTTPConfig) Validate() error {
+	if len(c.Targets) == 0 {
 		return fmt.Errorf("at least one target is required")
 	}
-	if len(h.ResolveIPVersions) == 0 {
+	if len(c.ResolveIPVersions) == 0 {
 		return fmt.Errorf("at least one resolve_ip_version is required")
 	}
-	for _, version := range h.ResolveIPVersions {
+	for _, version := range c.ResolveIPVersions {
+		if version != 4 && version != 6 {
+			return fmt.Errorf("invalid IP version: %d (must be 4 or 6)", version)
+		}
+	}
+	return nil
+}
+
+func (c *DNSConfig) Validate() error {
+	if len(c.Targets) == 0 {
+		return fmt.Errorf("at least one target is required")
+	}
+	if len(c.ResolveIPVersions) == 0 {
+		return fmt.Errorf("at least one resolve_ip_version is required")
+	}
+	for _, version := range c.ResolveIPVersions {
 		if version != 4 && version != 6 {
 			return fmt.Errorf("invalid IP version: %d (must be 4 or 6)", version)
 		}

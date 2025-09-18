@@ -22,3 +22,43 @@ probes:
       timeout_ms: 5000
       resolve_ip_versions: [4, 6]
       user_agent: "proberchan (+https://github.com/cuteip/proberchan)"
+
+  - name: "dns_authoritative"
+    type: "dns"
+    dns:
+      targets:
+        - server: udp://192.0.2.1
+          qname: test.example
+          qtype: soa
+
+        - server: tcp://192.0.2.1
+          qname: test.example
+          qtype: soa
+
+        - server: tcp://ns1.example
+          qname: test.example
+          qtype: soa
+      interval_ms: 500
+      timeout_ms: 1000
+      resolve_ip_versions: [4, 6]
+      flag_rd: false
+
+  - name: "dns_recursive"
+    type: "dns"
+    dns:
+      targets:
+        - server: udp://192.0.2.1
+          qname: test.example
+          qtype: a
+
+        - server: tcp://192.0.2.1
+          qname: test.example
+          qtype: a
+
+        - server: tcp://resolver1.example
+          qname: test.example
+          qtype: txt
+      interval_ms: 500
+      timeout_ms: 1000
+      resolve_ip_versions: [4, 6]
+      flag_rd: true

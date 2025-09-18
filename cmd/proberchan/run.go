@@ -13,6 +13,7 @@ import (
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
 	"github.com/cuteip/proberchan/probers"
+	probedns "github.com/cuteip/proberchan/probers/dns"
 	probehttp "github.com/cuteip/proberchan/probers/http"
 	probeping "github.com/cuteip/proberchan/probers/ping"
 	"github.com/pkg/errors"
@@ -22,6 +23,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/prometheus"
+
+	// "go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.uber.org/zap"
@@ -93,6 +96,15 @@ func run(cmd *cobra.Command, _ []string) error {
 			prober.SetConfig(probe.HTTP)
 			prober.Start(ctx)
 			runningProbers.AddHTTP(probe.Name, prober)
+		case "dns":
+			l.Debug("starting dns prober", zap.String("name", probe.Name))
+			prober, err := probedns.New(l, dnsRunner, probe.Name)
+			if err != nil {
+				return err
+			}
+			prober.SetConfig(probe.DNS)
+			prober.Start(ctx)
+			runningProbers.AddDNS(probe.Name, prober)
 		}
 	}
 
@@ -131,6 +143,9 @@ func run(cmd *cobra.Command, _ []string) error {
 					case "http":
 						l.Info("stop http prober", zap.String("name", curProbe.Name))
 						runningProbers.RemoveHTTP(curProbe.Name)
+					case "dns":
+						l.Info("stop dns prober", zap.String("name", curProbe.Name))
+						runningProbers.RemoveDNS(curProbe.Name)
 					}
 				}
 			}
@@ -169,6 +184,22 @@ func run(cmd *cobra.Command, _ []string) error {
 						prober.SetConfig(newConfProbe.HTTP)
 						prober.Start(ctx)
 						runningProbers.AddHTTP(newConfProbe.Name, prober)
+					}
+				case "dns":
+					prober, exist := runningProbers.GetDNS(newConfProbe.Name)
+					if exist {
+						l.Info("update dns probe", zap.String("name", newConfProbe.Name))
+						prober.SetConfig(newConfProbe.DNS)
+					} else {
+						l.Info("start new dns probe", zap.String("name", newConfProbe.Name))
+						prober, err := probedns.New(l, dnsRunner, newConfProbe.Name)
+						if err != nil {
+							l.Warn("failed to create new dns prober", zap.Error(err))
+							continue
+						}
+						prober.SetConfig(newConfProbe.DNS)
+						prober.Start(ctx)
+						runningProbers.AddDNS(newConfProbe.Name, prober)
 					}
 				}
 			}
@@ -210,6 +241,7 @@ func initMeterProvider(ctx context.Context) (func(context.Context) error, error)
 	var views []sdkmetric.View
 	views = append(views, probeping.ViewExponentialHistograms...)
 	views = append(views, probehttp.ViewExponentialHistograms...)
+	views = append(views, probedns.ViewExponentialHistograms...)
 	mprovider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithView(views...),
 		sdkmetric.WithReader(readerOtlpHTTP),
