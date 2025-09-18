@@ -150,25 +150,25 @@ func (r *Runner) probe(ctx context.Context, conf *config.HTTPConfig) {
 				return
 			}
 			baseAttr := append(baseAttr, attribute.String("target", targetURL.String()))
-			r.probeByTarget(ctx, conf, targetURL, baseAttr)
+			r.probeByTarget(ctx, targetURL, baseAttr)
 		}(target)
 	}
 	wg.Wait()
 }
 
-func (r *Runner) probeByTarget(ctx context.Context, conf *config.HTTPConfig, target *url.URL, baseAttrs []attribute.KeyValue) {
+func (r *Runner) probeByTarget(ctx context.Context, target *url.URL, baseAttrs []attribute.KeyValue) {
 	var timeout time.Duration
-	if conf.TimeoutMs == 0 {
+	if r.GetConfig().TimeoutMs == 0 {
 		timeout = defaultTimeout
 	} else {
-		timeout = time.Duration(conf.TimeoutMs) * time.Millisecond
+		timeout = time.Duration(r.GetConfig().TimeoutMs) * time.Millisecond
 	}
 
 	var userAgent string
-	if conf.UserAgent == "" {
+	if r.GetConfig().UserAgent == "" {
 		userAgent = defaultUserAgent
 	} else {
-		userAgent = conf.UserAgent
+		userAgent = r.GetConfig().UserAgent
 	}
 
 	type ipVersion struct {
@@ -176,7 +176,7 @@ func (r *Runner) probeByTarget(ctx context.Context, conf *config.HTTPConfig, tar
 		network string // net.Dial network
 	}
 	ipVersions := []ipVersion{}
-	for _, ipv := range conf.ResolveIPVersions {
+	for _, ipv := range r.GetConfig().ResolveIPVersions {
 		switch ipv {
 		case 4:
 			ipVersions = append(ipVersions, ipVersion{version: 4, network: "tcp4"})

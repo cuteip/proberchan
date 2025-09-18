@@ -192,7 +192,7 @@ func (r *Runner) probe(ctx context.Context, conf *config.DNSConfig) {
 
 			// とりあえずは逐次で DNS パケットを送信する
 			for _, dstIPAddr := range dstIPAddrs {
-				err := r.probeByIPAddr(ctx, conf, protocol, dstIPAddr, port, qname, qtypeInt, baseAttr)
+				err := r.probeByIPAddr(ctx, protocol, dstIPAddr, port, qname, qtypeInt, baseAttr)
 				if err != nil {
 					r.l.Warn("failed to probe", zap.Error(err))
 				}
@@ -204,7 +204,6 @@ func (r *Runner) probe(ctx context.Context, conf *config.DNSConfig) {
 
 func (r *Runner) probeByIPAddr(
 	ctx context.Context,
-	conf *config.DNSConfig,
 	protocol Protocol,
 	ipAddr netip.Addr,
 	port int,
@@ -213,10 +212,10 @@ func (r *Runner) probeByIPAddr(
 	baseAttrs []attribute.KeyValue,
 ) error {
 	var timeout time.Duration
-	if conf.TimeoutMs == 0 {
+	if r.GetConfig().TimeoutMs == 0 {
 		timeout = defaultTimeout
 	} else {
-		timeout = time.Duration(conf.TimeoutMs) * time.Millisecond
+		timeout = time.Duration(r.GetConfig().TimeoutMs) * time.Millisecond
 	}
 
 	client := dns.Client{
@@ -225,7 +224,7 @@ func (r *Runner) probeByIPAddr(
 	}
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
-	if conf.FlagRD {
+	if r.GetConfig().FlagRD {
 		m.RecursionDesired = true
 	}
 

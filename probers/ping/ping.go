@@ -167,7 +167,7 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 			}
 			// とりあえずは逐次で ping する
 			for _, dstIPAddr := range dstIPAddrs {
-				err := r.probeByIPAddr(ctx, conf, dstIPAddr, baseAttr)
+				err := r.probeByIPAddr(ctx, dstIPAddr, baseAttr)
 				if err != nil {
 					r.l.Warn("failed to probe", zap.Error(err))
 				}
@@ -177,25 +177,25 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 	wg.Wait()
 }
 
-func (r *Runner) probeByIPAddr(ctx context.Context, conf *config.PingConfig, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
+func (r *Runner) probeByIPAddr(ctx context.Context, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
 	pinger := probing.New("")
 	pinger.SetIPAddr(&net.IPAddr{IP: ipAddr.AsSlice()})
 	pinger.Count = 1
-	if conf.DF {
+	if r.GetConfig().DF {
 		pinger.SetDoNotFragment(true)
 	}
-	if conf.Size > 0 {
-		pinger.Size = int(conf.Size)
+	if r.GetConfig().Size > 0 {
+		pinger.Size = int(r.GetConfig().Size)
 	}
 
 	// pinger.Timeout にセットするとタイムアウトになったかどうかを判定できないので、
 	// context に WithTimeout でセットしてそれで判定する
 	// https://github.com/prometheus-community/pro-bing/issues/70#issuecomment-2307468862
 	var timeout time.Duration
-	if conf.TimeoutMs == 0 {
+	if r.GetConfig().TimeoutMs == 0 {
 		timeout = defaultTimeout
 	} else {
-		timeout = time.Duration(conf.TimeoutMs) * time.Millisecond
+		timeout = time.Duration(r.GetConfig().TimeoutMs) * time.Millisecond
 	}
 	pingerCtx, _ := context.WithTimeout(ctx, timeout)
 	r.l.Debug("ping run ...", zap.String("pinger", fmt.Sprintf("%+v", pinger)), zap.Duration("timeout", timeout))
@@ -206,7 +206,7 @@ func (r *Runner) probeByIPAddr(ctx context.Context, conf *config.PingConfig, ipA
 
 	attrs := []attribute.KeyValue{
 		attribute.Int("size", pinger.Size),
-		attribute.Bool("df", conf.DF),
+		attribute.Bool("df", r.GetConfig().DF),
 		attribute.String("ip_address", ipAddr.String()),
 		attribute.Int("ip_version", ipVersion),
 	}
