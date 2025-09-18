@@ -16,3 +16,9 @@ export OTEL_RESOURCE_ATTRIBUTES="service.name=proberchan,service.instance.id=$(c
 
 ./proberchan --log-level info
 ```
+
+## dev memo
+
+```shell
+git tag $(date --utc +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)
+```
