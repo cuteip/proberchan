@@ -2,6 +2,7 @@ package probehttp
 
 import (
 	"context"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -120,17 +121,20 @@ func (r *Runner) Stop() {
 }
 
 func (r *Runner) ProbeTickerLoop(ctx context.Context) {
-	interval := time.Duration(r.GetConfig().IntervalMs) * time.Millisecond
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	baseInterval := time.Duration(r.GetConfig().IntervalMs) * time.Millisecond
+	jitter := time.Duration(rand.Int63n(int64(baseInterval / 10))) // 0-10%
+	timer := time.NewTimer(jitter)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-r.stop:
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			go r.probe(ctx, r.GetConfig())
+			jitter = time.Duration(rand.Int63n(int64(baseInterval / 5)))
+			timer.Reset(baseInterval + jitter)
 		}
 	}
 }
