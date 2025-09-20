@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net"
 	"net/netip"
 	"sync"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
+	"github.com/cuteip/proberchan/internal/timeutil"
 	"github.com/cuteip/proberchan/otelconst"
 	"github.com/miekg/dns"
 	probing "github.com/prometheus-community/pro-bing"
@@ -109,8 +109,7 @@ func (r *Runner) Stop() {
 
 func (r *Runner) ProbeTickerLoop(ctx context.Context) {
 	baseInterval := time.Duration(r.GetConfig().IntervalMs) * time.Millisecond
-	jitter := time.Duration(rand.Int63n(int64(baseInterval / 10))) // 0-10%
-	timer := time.NewTimer(jitter)
+	timer := time.NewTimer(timeutil.CalcJitter(baseInterval))
 	defer timer.Stop()
 	for {
 		select {
@@ -120,8 +119,7 @@ func (r *Runner) ProbeTickerLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 			go r.probe(ctx, r.GetConfig())
-			jitter = time.Duration(rand.Int63n(int64(baseInterval / 5)))
-			timer.Reset(baseInterval + jitter)
+			timer.Reset(baseInterval + timeutil.CalcJitter(baseInterval))
 		}
 	}
 }
