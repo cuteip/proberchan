@@ -1,2 +1,5 @@
 /proberchan
 /config.yaml
+
+# goreleaser output
+/dist
