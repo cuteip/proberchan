@@ -31,6 +31,7 @@ type PingConfig struct {
 	TimeoutMs         int          `yaml:"timeout_ms"`
 	DF                bool         `yaml:"df"`
 	Size              int          `yaml:"size"`
+	Src               string       `yaml:"src"`
 	ResolveIPVersions []int        `yaml:"resolve_ip_versions"`
 }
 

@@ -127,6 +127,9 @@ func (r *Runner) ProbeTickerLoop(ctx context.Context) {
 func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 	var wg sync.WaitGroup
 	baseAttr := []attribute.KeyValue{attribute.String("probe", r.name)}
+	if conf.Src != "" {
+		baseAttr = append(baseAttr, attribute.String("src", conf.Src))
+	}
 	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 	for _, target := range conf.Targets {
 		wg.Add(1)
@@ -183,26 +186,35 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 }
 
 func (r *Runner) probeByIPAddr(ctx context.Context, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
+	conf := r.GetConfig()
 	pinger := probing.New("")
 	pinger.SetIPAddr(&net.IPAddr{IP: ipAddr.AsSlice()})
 	pinger.Count = 1
-	if r.GetConfig().DF {
+	if conf.DF {
 		pinger.SetDoNotFragment(true)
 	}
-	if r.GetConfig().Size > 0 {
-		pinger.Size = int(r.GetConfig().Size)
+	if conf.Size > 0 {
+		pinger.Size = int(conf.Size)
+	}
+	if conf.Src != "" {
+		if _, err := net.InterfaceByName(conf.Src); err != nil {
+			r.l.Warn("src interface not found for ping", zap.String("src", conf.Src), zap.String("dst_ip", ipAddr.String()), zap.Error(err))
+			return nil
+		}
+		pinger.InterfaceName = conf.Src
 	}
 
 	// pinger.Timeout にセットするとタイムアウトになったかどうかを判定できないので、
 	// context に WithTimeout でセットしてそれで判定する
 	// https://github.com/prometheus-community/pro-bing/issues/70#issuecomment-2307468862
 	var timeout time.Duration
-	if r.GetConfig().TimeoutMs == 0 {
+	if conf.TimeoutMs == 0 {
 		timeout = defaultTimeout
 	} else {
-		timeout = time.Duration(r.GetConfig().TimeoutMs) * time.Millisecond
+		timeout = time.Duration(conf.TimeoutMs) * time.Millisecond
 	}
-	pingerCtx, _ := context.WithTimeout(ctx, timeout)
+	pingerCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	r.l.Debug("ping run ...", zap.String("pinger", fmt.Sprintf("%+v", pinger)), zap.Duration("timeout", timeout))
 	ipVersion := 4
 	if ipAddr.Is6() {
@@ -211,7 +223,7 @@ func (r *Runner) probeByIPAddr(ctx context.Context, ipAddr netip.Addr, baseAttrs
 
 	attrs := []attribute.KeyValue{
 		attribute.Int("size", pinger.Size),
-		attribute.Bool("df", r.GetConfig().DF),
+		attribute.Bool("df", conf.DF),
 		attribute.String("ip_address", ipAddr.String()),
 		attribute.Int("ip_version", ipVersion),
 	}
