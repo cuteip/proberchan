@@ -5,8 +5,9 @@ probes:
     type: "ping"
     ping:
       targets:
-        - "host1.example"
-        - "host2.example"
+        - host: "host1.example"
+          description: "Primary web server"
+        - host: "host2.example"
       interval_ms: 500
       timeout_ms: 1000
       df: false
@@ -16,8 +17,9 @@ probes:
     type: "http"
     http:
       targets:
-        - "http://host1.example/health"
-        - "http://host2.example:8080/ping"
+        - url: "http://host1.example/health"
+          description: "Health check endpoint"
+        - url: "http://host2.example:8080/ping"
       interval_ms: 1000
       timeout_ms: 5000
       resolve_ip_versions: [4, 6]
@@ -30,6 +32,7 @@ probes:
         - server: udp://192.0.2.1
           qname: test.example
           qtype: soa
+          description: "Authoritative UDP query"
 
         - server: tcp://192.0.2.1
           qname: test.example
@@ -50,6 +53,7 @@ probes:
         - server: udp://192.0.2.1
           qname: test.example
           qtype: a
+          description: "Recursive UDP query"
 
         - server: tcp://192.0.2.1
           qname: test.example
