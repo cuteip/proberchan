@@ -142,6 +142,10 @@ func (r *Runner) probe(ctx context.Context, conf *config.DNSConfig) {
 			qtype := strings.ToUpper(target.QType)
 			baseAttr = append(baseAttr, attribute.String("qtype", qtype))
 
+			if target.Description != "" {
+				baseAttr = append(baseAttr, attribute.String("description", target.Description))
+			}
+
 			protocol, host, port, err := parseServer(target.Server)
 			if err != nil {
 				r.l.Warn("failed to parse server", zap.Error(err))

@@ -143,15 +143,20 @@ func (r *Runner) probe(ctx context.Context, conf *config.HTTPConfig) {
 	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 	for _, target := range conf.Targets {
 		wg.Add(1)
-		go func(target string) {
+		go func(target config.HTTPTarget) {
 			defer wg.Done()
-			targetURL, err := url.Parse(target)
+			targetURL, err := url.Parse(target.URL)
 			if err != nil {
 				r.failed.Add(ctx, 1, metric.WithAttributes(attrReasonFailedToParseURL))
 				r.l.Warn("failed to parse URL", zap.Error(err))
 				return
 			}
 			baseAttr := append(baseAttr, attribute.String("target", targetURL.String()))
+
+			if target.Description != "" {
+				baseAttr = append(baseAttr, attribute.String("description", target.Description))
+			}
+
 			r.probeByTarget(ctx, targetURL, baseAttr)
 		}(target)
 	}

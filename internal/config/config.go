@@ -20,21 +20,31 @@ type ProbeConfig struct {
 	DNS  *DNSConfig  `yaml:"dns,omitempty"`
 }
 
+type PingTarget struct {
+	Host        string `yaml:"host"`
+	Description string `yaml:"description,omitempty"`
+}
+
 type PingConfig struct {
-	Targets           []string `yaml:"targets"`
-	IntervalMs        int      `yaml:"interval_ms"`
-	TimeoutMs         int      `yaml:"timeout_ms"`
-	DF                bool     `yaml:"df"`
-	Size              int      `yaml:"size"`
-	ResolveIPVersions []int    `yaml:"resolve_ip_versions"`
+	Targets           []PingTarget `yaml:"targets"`
+	IntervalMs        int          `yaml:"interval_ms"`
+	TimeoutMs         int          `yaml:"timeout_ms"`
+	DF                bool         `yaml:"df"`
+	Size              int          `yaml:"size"`
+	ResolveIPVersions []int        `yaml:"resolve_ip_versions"`
+}
+
+type HTTPTarget struct {
+	URL         string `yaml:"url"`
+	Description string `yaml:"description,omitempty"`
 }
 
 type HTTPConfig struct {
-	Targets           []string `yaml:"targets"`
-	IntervalMs        int      `yaml:"interval_ms"`
-	TimeoutMs         int      `yaml:"timeout_ms"`
-	ResolveIPVersions []int    `yaml:"resolve_ip_versions"`
-	UserAgent         string   `yaml:"user_agent"`
+	Targets           []HTTPTarget `yaml:"targets"`
+	IntervalMs        int          `yaml:"interval_ms"`
+	TimeoutMs         int          `yaml:"timeout_ms"`
+	ResolveIPVersions []int        `yaml:"resolve_ip_versions"`
+	UserAgent         string       `yaml:"user_agent"`
 }
 
 type DNSConfig struct {
@@ -45,9 +55,10 @@ type DNSConfig struct {
 	FlagRD            bool        `yaml:"flag_rd"`
 }
 type DNSTarget struct {
-	Server string `yaml:"server"`
-	QName  string `yaml:"qname"`
-	QType  string `yaml:"qtype"`
+	Server      string `yaml:"server"`
+	QName       string `yaml:"qname"`
+	QType       string `yaml:"qtype"`
+	Description string `yaml:"description,omitempty"`
 }
 
 func LoadFromFile(path string) (*Config, error) {

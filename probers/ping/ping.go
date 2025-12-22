@@ -130,22 +130,25 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 	r.attempts.Add(ctx, 1, metric.WithAttributes(baseAttr...))
 	for _, target := range conf.Targets {
 		wg.Add(1)
-		go func(target string) {
+		go func(target config.PingTarget) {
 			defer wg.Done()
-			baseAttr := append(baseAttr, attribute.String("target", target))
-			// target は config に書かれた "targets" の文字列そのまま
-			// めっちゃややこしい
+			baseAttr := append(baseAttr, attribute.String("target", target.Host))
+
+			if target.Description != "" {
+				baseAttr = append(baseAttr, attribute.String("description", target.Description))
+			}
+
 			var dstIPAddrs []netip.Addr // 実際に ping する宛先 IP アドレス
-			targetIPAddr, err := netip.ParseAddr(target)
+			targetIPAddr, err := netip.ParseAddr(target.Host)
 			if err == nil {
 				dstIPAddrs = []netip.Addr{targetIPAddr}
 			} else {
-				// target が IP アドレスでない場合は FQDN（末尾ドット有無は曖昧）とみなして名前解決する
+				// host が IP アドレスでない場合は FQDN（末尾ドット有無は曖昧）とみなして名前解決する
 				for _, ipv := range conf.ResolveIPVersions {
 					// 名前解決に失敗しても、もう一方の IP バージョン側で成功する可能性があるので、continue で継続
 					switch ipv {
 					case 4:
-						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target), dns.Type(dns.TypeA))
+						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target.Host), dns.Type(dns.TypeA))
 						if err != nil {
 							r.l.Warn("failed to resolve IPv4 address", zap.Error(err))
 							attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
@@ -154,7 +157,7 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 						}
 						dstIPAddrs = append(dstIPAddrs, ips...)
 					case 6:
-						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target), dns.Type(dns.TypeAAAA))
+						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target.Host), dns.Type(dns.TypeAAAA))
 						if err != nil {
 							r.l.Warn("failed to resolve IPv6 address", zap.Error(err))
 							attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
