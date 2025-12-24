@@ -13,6 +13,7 @@ import (
 
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
+	"github.com/cuteip/proberchan/internal/netnshelper"
 	"github.com/cuteip/proberchan/internal/timeutil"
 	"github.com/cuteip/proberchan/otelconst"
 	"github.com/miekg/dns"
@@ -39,15 +40,17 @@ var (
 )
 
 type Runner struct {
-	l        *zap.Logger
-	dns      *dnsutil.Runner
-	latency  metric.Int64Histogram
-	attempts metric.Int64Counter
-	failed   metric.Int64Counter
+	l          *zap.Logger
+	dns        *dnsutil.Runner
+	nsExecutor netnshelper.Executor
+	latency    metric.Int64Histogram
+	attempts   metric.Int64Counter
+	failed     metric.Int64Counter
 
-	name  string
-	state RunnerState
-	stop  chan struct{}
+	name      string
+	state     RunnerState
+	namespace namespaceState
+	stop      chan struct{}
 }
 
 type RunnerState struct {
@@ -55,7 +58,24 @@ type RunnerState struct {
 	conf *config.DNSConfig
 }
 
-func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
+type namespaceState struct {
+	mu   sync.RWMutex
+	name string
+}
+
+func (n *namespaceState) Set(name string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.name = strings.TrimSpace(name)
+}
+
+func (n *namespaceState) Get() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.name
+}
+
+func New(l *zap.Logger, dns *dnsutil.Runner, name string, executor netnshelper.Executor) (*Runner, error) {
 	latencyHist, err := otel.Meter("proberchan").Int64Histogram("dns_latency",
 		metric.WithUnit("ns"),
 		metric.WithDescription("Latency (RTT) of dns probes"),
@@ -77,15 +97,19 @@ func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
 		return nil, err
 	}
 	return &Runner{
-		l:        l,
-		dns:      dns,
-		latency:  latencyHist,
-		attempts: attemptsCounter,
-		failed:   failedCounter,
-		name:     name,
+		l:          l,
+		dns:        dns,
+		nsExecutor: executor,
+		latency:    latencyHist,
+		attempts:   attemptsCounter,
+		failed:     failedCounter,
+		name:       name,
 		state: RunnerState{
 			mu:   sync.RWMutex{},
 			conf: &config.DNSConfig{},
+		},
+		namespace: namespaceState{
+			mu: sync.RWMutex{},
 		},
 		stop: make(chan struct{}),
 	}, nil
@@ -101,6 +125,32 @@ func (r *Runner) SetConfig(conf *config.DNSConfig) {
 	r.state.mu.Lock()
 	defer r.state.mu.Unlock()
 	r.state.conf = conf
+}
+
+func (r *Runner) SetNamespace(namespace string) {
+	r.namespace.Set(namespace)
+}
+
+func (r *Runner) GetNamespace() string {
+	return r.namespace.Get()
+}
+
+func (r *Runner) withNamespace(ctx context.Context, fn func(context.Context) error) error {
+	if r.nsExecutor == nil {
+		return fn(ctx)
+	}
+	namespace := r.GetNamespace()
+	if namespace == "" {
+		return fn(ctx)
+	}
+	return r.nsExecutor.WithNamespace(ctx, namespace, fn)
+}
+
+func (r *Runner) logFields(fields ...zap.Field) []zap.Field {
+	if namespace := r.GetNamespace(); namespace != "" {
+		fields = append(fields, zap.String("netns", namespace))
+	}
+	return fields
 }
 
 func (r *Runner) Start(ctx context.Context) {
@@ -148,7 +198,7 @@ func (r *Runner) probe(ctx context.Context, conf *config.DNSConfig) {
 
 			protocol, host, port, err := parseServer(target.Server)
 			if err != nil {
-				r.l.Warn("failed to parse server", zap.Error(err))
+				r.l.Warn("failed to parse server", r.logFields(zap.Error(err))...)
 				attrs := append(baseAttr, attrResonFailedToParseServer)
 				r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 				return
@@ -165,32 +215,42 @@ func (r *Runner) probe(ctx context.Context, conf *config.DNSConfig) {
 					// 名前解決に失敗しても、もう一方の IP バージョン側で成功する可能性があるので、continue で継続
 					switch ipv {
 					case 4:
-						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(host), dns.Type(dns.TypeA))
-						if err != nil {
-							r.l.Warn("failed to resolve IPv4 address", zap.Error(err))
+						var ips []netip.Addr
+						resolveErr := r.withNamespace(ctx, func(ctx context.Context) error {
+							var err error
+							ips, err = r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(host), dns.Type(dns.TypeA))
+							return err
+						})
+						if resolveErr != nil {
+							r.l.Warn("failed to resolve IPv4 address", r.logFields(zap.Error(resolveErr))...)
 							attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
 							r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 							continue
 						}
 						dstIPAddrs = append(dstIPAddrs, ips...)
 					case 6:
-						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(host), dns.Type(dns.TypeAAAA))
-						if err != nil {
-							r.l.Warn("failed to resolve IPv6 address", zap.Error(err))
+						var ips []netip.Addr
+						resolveErr := r.withNamespace(ctx, func(ctx context.Context) error {
+							var err error
+							ips, err = r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(host), dns.Type(dns.TypeAAAA))
+							return err
+						})
+						if resolveErr != nil {
+							r.l.Warn("failed to resolve IPv6 address", r.logFields(zap.Error(resolveErr))...)
 							attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
 							r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 							continue
 						}
 						dstIPAddrs = append(dstIPAddrs, ips...)
 					default:
-						r.l.Warn("unknown IP version", zap.Int("ip_version", ipv))
+						r.l.Warn("unknown IP version", r.logFields(zap.Int("ip_version", ipv))...)
 					}
 				}
 			}
 
 			qtypeInt, ok := dns.StringToType[qtype]
 			if !ok {
-				r.l.Warn("unknown DNS qtype", zap.String("qtype", qtype))
+				r.l.Warn("unknown DNS qtype", r.logFields(zap.String("qtype", qtype))...)
 				attrs := append(baseAttr, attrResonFailedToParseQType)
 				r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 				return
@@ -200,7 +260,7 @@ func (r *Runner) probe(ctx context.Context, conf *config.DNSConfig) {
 			for _, dstIPAddr := range dstIPAddrs {
 				err := r.probeByIPAddr(ctx, protocol, dstIPAddr, port, qname, qtypeInt, baseAttr)
 				if err != nil {
-					r.l.Warn("failed to probe", zap.Error(err))
+					r.l.Warn("failed to probe", r.logFields(zap.Error(err))...)
 				}
 			}
 		}(target)
@@ -217,57 +277,59 @@ func (r *Runner) probeByIPAddr(
 	qtype uint16,
 	baseAttrs []attribute.KeyValue,
 ) error {
-	var timeout time.Duration
-	if r.GetConfig().TimeoutMs == 0 {
-		timeout = defaultTimeout
-	} else {
-		timeout = time.Duration(r.GetConfig().TimeoutMs) * time.Millisecond
-	}
+	return r.withNamespace(ctx, func(ctx context.Context) error {
+		var timeout time.Duration
+		if r.GetConfig().TimeoutMs == 0 {
+			timeout = defaultTimeout
+		} else {
+			timeout = time.Duration(r.GetConfig().TimeoutMs) * time.Millisecond
+		}
 
-	client := dns.Client{
-		Net:     protocol.String(),
-		Timeout: timeout,
-	}
-	m := new(dns.Msg)
-	m.SetQuestion(qname, qtype)
-	if r.GetConfig().FlagRD {
-		m.RecursionDesired = true
-	}
+		client := dns.Client{
+			Net:     protocol.String(),
+			Timeout: timeout,
+		}
+		m := new(dns.Msg)
+		m.SetQuestion(qname, qtype)
+		if r.GetConfig().FlagRD {
+			m.RecursionDesired = true
+		}
 
-	start := time.Now()
-	ans, _, err := client.ExchangeContext(ctx, m, netip.AddrPortFrom(ipAddr, uint16(port)).String())
-	if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
-		r.l.Warn("dns timeout (net.OpError)", zap.Error(err))
-		attrs := append(baseAttrs, attrDNSTimeout)
-		r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
+		start := time.Now()
+		ans, _, err := client.ExchangeContext(ctx, m, netip.AddrPortFrom(ipAddr, uint16(port)).String())
+		if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
+			r.l.Warn("dns timeout (net.OpError)", r.logFields(zap.Error(err))...)
+			attrs := append(baseAttrs, attrDNSTimeout)
+			r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
+			return nil
+		}
+		if err != nil {
+			r.l.Warn("failed to exchange dns message", r.logFields(zap.Error(err))...)
+			attrs := append(baseAttrs, attrResonUnknown)
+			r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
+			return err
+		}
+		end := time.Now()
+
+		ipVersion := 4
+		if ipAddr.Is6() {
+			ipVersion = 6
+		}
+
+		rcodeStr, ok := dns.RcodeToString[ans.Rcode]
+		if !ok {
+			rcodeStr = fmt.Sprintf("%d", ans.Rcode)
+		}
+
+		attrs := []attribute.KeyValue{
+			attribute.String("ip_address", ipAddr.String()),
+			attribute.Int("ip_version", ipVersion),
+			attribute.String("rcode", rcodeStr),
+		}
+		attrs = append(baseAttrs, attrs...)
+		r.latency.Record(ctx, end.Sub(start).Nanoseconds(), metric.WithAttributes(attrs...))
 		return nil
-	}
-	if err != nil {
-		r.l.Warn("failed to exchange dns message", zap.Error(err))
-		attrs := append(baseAttrs, attrResonUnknown)
-		r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
-		return err
-	}
-	end := time.Now()
-
-	ipVersion := 4
-	if ipAddr.Is6() {
-		ipVersion = 6
-	}
-
-	rcodeStr, ok := dns.RcodeToString[ans.Rcode]
-	if !ok {
-		rcodeStr = fmt.Sprintf("%d", ans.Rcode)
-	}
-
-	attrs := []attribute.KeyValue{
-		attribute.String("ip_address", ipAddr.String()),
-		attribute.Int("ip_version", ipVersion),
-		attribute.String("rcode", rcodeStr),
-	}
-	attrs = append(baseAttrs, attrs...)
-	r.latency.Record(ctx, end.Sub(start).Nanoseconds(), metric.WithAttributes(attrs...))
-	return nil
+	})
 }
 
 func parseServer(s string) (Protocol, string, int, error) {

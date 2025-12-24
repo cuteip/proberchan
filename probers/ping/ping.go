@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
+	"github.com/cuteip/proberchan/internal/netnshelper"
 	"github.com/cuteip/proberchan/internal/timeutil"
 	"github.com/cuteip/proberchan/otelconst"
 	"github.com/miekg/dns"
@@ -35,15 +37,17 @@ var (
 )
 
 type Runner struct {
-	l        *zap.Logger
-	dns      *dnsutil.Runner
-	latency  metric.Int64Histogram
-	attempts metric.Int64Counter
-	failed   metric.Int64Counter
+	l          *zap.Logger
+	dns        *dnsutil.Runner
+	nsExecutor netnshelper.Executor
+	latency    metric.Int64Histogram
+	attempts   metric.Int64Counter
+	failed     metric.Int64Counter
 
-	name  string
-	state RunnerState
-	stop  chan struct{}
+	name      string
+	state     RunnerState
+	namespace namespaceState
+	stop      chan struct{}
 }
 
 type RunnerState struct {
@@ -51,7 +55,24 @@ type RunnerState struct {
 	conf *config.PingConfig
 }
 
-func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
+type namespaceState struct {
+	mu   sync.RWMutex
+	name string
+}
+
+func (n *namespaceState) Set(name string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.name = strings.TrimSpace(name)
+}
+
+func (n *namespaceState) Get() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.name
+}
+
+func New(l *zap.Logger, dns *dnsutil.Runner, name string, executor netnshelper.Executor) (*Runner, error) {
 	latencyHist, err := otel.Meter("proberchan").Int64Histogram("ping_latency",
 		metric.WithUnit("ns"),
 		metric.WithDescription("Latency (RTT) of ping probes"),
@@ -73,15 +94,19 @@ func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
 		return nil, err
 	}
 	return &Runner{
-		l:        l,
-		dns:      dns,
-		latency:  latencyHist,
-		attempts: attemptsCounter,
-		failed:   failedCounter,
-		name:     name,
+		l:          l,
+		dns:        dns,
+		nsExecutor: executor,
+		latency:    latencyHist,
+		attempts:   attemptsCounter,
+		failed:     failedCounter,
+		name:       name,
 		state: RunnerState{
 			mu:   sync.RWMutex{},
 			conf: &config.PingConfig{},
+		},
+		namespace: namespaceState{
+			mu: sync.RWMutex{},
 		},
 		stop: make(chan struct{}),
 	}, nil
@@ -97,6 +122,29 @@ func (r *Runner) SetConfig(conf *config.PingConfig) {
 	r.state.mu.Lock()
 	defer r.state.mu.Unlock()
 	r.state.conf = conf
+}
+
+func (r *Runner) SetNamespace(namespace string) {
+	r.namespace.Set(namespace)
+}
+
+func (r *Runner) GetNamespace() string {
+	return r.namespace.Get()
+}
+
+func (r *Runner) withNamespace(ctx context.Context, fn func(context.Context) error) error {
+	namespace := r.GetNamespace()
+	if namespace == "" || r.nsExecutor == nil {
+		return fn(ctx)
+	}
+	return r.nsExecutor.WithNamespace(ctx, namespace, fn)
+}
+
+func (r *Runner) logFields(fields ...zap.Field) []zap.Field {
+	if namespace := r.GetNamespace(); namespace != "" {
+		fields = append(fields, zap.String("netns", namespace))
+	}
+	return fields
 }
 
 func (r *Runner) Start(ctx context.Context) {
@@ -153,7 +201,7 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 					case 4:
 						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target.Host), dns.Type(dns.TypeA))
 						if err != nil {
-							r.l.Warn("failed to resolve IPv4 address", zap.Error(err))
+							r.l.Warn("failed to resolve IPv4 address", r.logFields(zap.Error(err))...)
 							attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
 							r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 							continue
@@ -162,14 +210,14 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 					case 6:
 						ips, err := r.dns.ResolveIPAddrByQNAME(ctx, dnsutil.MustQnameSuffixDot(target.Host), dns.Type(dns.TypeAAAA))
 						if err != nil {
-							r.l.Warn("failed to resolve IPv6 address", zap.Error(err))
+							r.l.Warn("failed to resolve IPv6 address", r.logFields(zap.Error(err))...)
 							attrs := append(baseAttr, attrResonFailedToResolveIPAddr)
 							r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 							continue
 						}
 						dstIPAddrs = append(dstIPAddrs, ips...)
 					default:
-						r.l.Warn("unknown IP version", zap.Int("ip_version", ipv))
+						r.l.Warn("unknown IP version", r.logFields(zap.Int("ip_version", ipv))...)
 					}
 				}
 			}
@@ -177,7 +225,7 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 			for _, dstIPAddr := range dstIPAddrs {
 				err := r.probeByIPAddr(ctx, dstIPAddr, baseAttr)
 				if err != nil {
-					r.l.Warn("failed to probe", zap.Error(err))
+					r.l.Warn("failed to probe", r.logFields(zap.Error(err))...)
 				}
 			}
 		}(target)
@@ -186,63 +234,79 @@ func (r *Runner) probe(ctx context.Context, conf *config.PingConfig) {
 }
 
 func (r *Runner) probeByIPAddr(ctx context.Context, ipAddr netip.Addr, baseAttrs []attribute.KeyValue) error {
-	conf := r.GetConfig()
-	pinger := probing.New("")
-	pinger.SetIPAddr(&net.IPAddr{IP: ipAddr.AsSlice()})
-	pinger.Count = 1
-	if conf.DF {
-		pinger.SetDoNotFragment(true)
-	}
-	if conf.Size > 0 {
-		pinger.Size = int(conf.Size)
-	}
-	if conf.Src != "" {
-		if _, err := net.InterfaceByName(conf.Src); err != nil {
-			r.l.Warn("src interface not found for ping", zap.String("src", conf.Src), zap.String("dst_ip", ipAddr.String()), zap.Error(err))
-			return nil
+	return r.withNamespace(ctx, func(ctx context.Context) error {
+		conf := r.GetConfig()
+		pinger := probing.New("")
+		if ipAddr.Is6() && ipAddr.IsLinkLocalUnicast() {
+			pinger.SetPrivileged(true)
 		}
-		pinger.InterfaceName = conf.Src
-	}
+		ip := &net.IPAddr{IP: ipAddr.AsSlice()}
+		if ipAddr.Is6() && ipAddr.IsLinkLocalUnicast() && conf.Src != "" {
+			ip.Zone = conf.Src
+		}
+		pinger.SetIPAddr(ip)
+		pinger.Count = 1
+		if conf.DF {
+			pinger.SetDoNotFragment(true)
+		}
+		if conf.Size > 0 {
+			pinger.Size = int(conf.Size)
+		}
+		if conf.Src != "" {
+			if _, err := net.InterfaceByName(conf.Src); err != nil {
+				r.l.Warn("src interface not found for ping", r.logFields(
+					zap.String("src", conf.Src),
+					zap.String("dst_ip", ipAddr.String()),
+					zap.Error(err),
+				)...)
+				return nil
+			}
+			pinger.InterfaceName = conf.Src
+		}
 
-	// pinger.Timeout にセットするとタイムアウトになったかどうかを判定できないので、
-	// context に WithTimeout でセットしてそれで判定する
-	// https://github.com/prometheus-community/pro-bing/issues/70#issuecomment-2307468862
-	var timeout time.Duration
-	if conf.TimeoutMs == 0 {
-		timeout = defaultTimeout
-	} else {
-		timeout = time.Duration(conf.TimeoutMs) * time.Millisecond
-	}
-	pingerCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	r.l.Debug("ping run ...", zap.String("pinger", fmt.Sprintf("%+v", pinger)), zap.Duration("timeout", timeout))
-	ipVersion := 4
-	if ipAddr.Is6() {
-		ipVersion = 6
-	}
+		// pinger.Timeout にセットするとタイムアウトになったかどうかを判定できないので、
+		// context に WithTimeout でセットしてそれで判定する
+		// https://github.com/prometheus-community/pro-bing/issues/70#issuecomment-2307468862
+		var timeout time.Duration
+		if conf.TimeoutMs == 0 {
+			timeout = defaultTimeout
+		} else {
+			timeout = time.Duration(conf.TimeoutMs) * time.Millisecond
+		}
+		pingerCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		r.l.Debug("ping run ...", r.logFields(
+			zap.String("pinger", fmt.Sprintf("%+v", pinger)),
+			zap.Duration("timeout", timeout),
+		)...)
+		ipVersion := 4
+		if ipAddr.Is6() {
+			ipVersion = 6
+		}
 
-	attrs := []attribute.KeyValue{
-		attribute.Int("size", pinger.Size),
-		attribute.Bool("df", conf.DF),
-		attribute.String("ip_address", ipAddr.String()),
-		attribute.Int("ip_version", ipVersion),
-	}
-	attrs = append(attrs, baseAttrs...)
+		attrs := []attribute.KeyValue{
+			attribute.Int("size", pinger.Size),
+			attribute.Bool("df", conf.DF),
+			attribute.String("ip_address", ipAddr.String()),
+			attribute.Int("ip_version", ipVersion),
+		}
+		attrs = append(attrs, baseAttrs...)
 
-	err := pinger.RunWithContext(pingerCtx)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			// ping timeout
-			attrs = append(attrs, attrPingTimeout)
+		err := pinger.RunWithContext(pingerCtx)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				// ping timeout
+				attrs = append(attrs, attrPingTimeout)
+				r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
+				return nil
+			}
+			attrs = append(attrs, attrResonUnknown)
 			r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
-			return nil
+			return err
 		}
-		attrs = append(attrs, attrResonUnknown)
-		r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
-		return err
-	}
-	stats := pinger.Statistics()
-	// count は 1 だから min, max, avg もどれも同じになる
-	r.latency.Record(ctx, stats.MaxRtt.Nanoseconds(), metric.WithAttributes(attrs...))
-	return nil
+		stats := pinger.Statistics()
+		// count は 1 だから min, max, avg もどれも同じになる
+		r.latency.Record(ctx, stats.MaxRtt.Nanoseconds(), metric.WithAttributes(attrs...))
+		return nil
+	})
 }

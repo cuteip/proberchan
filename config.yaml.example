@@ -3,6 +3,7 @@ dns_resolver: "192.0.2.1:53"
 probes:
   - name: "ping_v4"
     type: "ping"
+    netns: "tenant-blue"
     ping:
       targets:
         - host: "host1.example"
@@ -16,6 +17,7 @@ probes:
 
   - name: "http_example"
     type: "http"
+    netns: "tenant-blue"
     http:
       targets:
         - url: "http://host1.example/health"
@@ -28,6 +30,7 @@ probes:
 
   - name: "dns_authoritative"
     type: "dns"
+    # netns is optional; when omitted the host namespace will be used.
     dns:
       targets:
         - server: udp://192.0.2.1
