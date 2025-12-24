@@ -12,6 +12,7 @@ import (
 
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
+	"github.com/cuteip/proberchan/internal/netnshelper"
 	"github.com/cuteip/proberchan/probers"
 	probedns "github.com/cuteip/proberchan/probers/dns"
 	probehttp "github.com/cuteip/proberchan/probers/http"
@@ -47,6 +48,12 @@ func run(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	nsManager := netnshelper.NewManager(l)
+	defer func() {
+		if err := nsManager.Close(); err != nil {
+			l.Warn("failed to close netns manager", zap.Error(err))
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	shutdownMeterProvider, err := initMeterProvider(ctx)
@@ -79,30 +86,45 @@ func run(cmd *cobra.Command, _ []string) error {
 	for _, probe := range conf.Probes {
 		switch probe.Type {
 		case "ping":
-			l.Debug("starting ping prober", zap.String("name", probe.Name))
-			prober, err := probeping.New(l, dnsRunner, probe.Name)
+			fields := []zap.Field{zap.String("name", probe.Name)}
+			if probe.NetNS != "" {
+				fields = append(fields, zap.String("netns", probe.NetNS))
+			}
+			l.Debug("starting ping prober", fields...)
+			prober, err := probeping.New(l, dnsRunner, probe.Name, nsManager)
 			if err != nil {
 				return err
 			}
 			prober.SetConfig(probe.Ping)
+			prober.SetNamespace(probe.NetNS)
 			prober.Start(ctx)
 			runningProbers.AddPing(probe.Name, prober)
 		case "http":
-			l.Debug("starting http prober", zap.String("name", probe.Name))
-			prober, err := probehttp.New(l, dnsRunner, probe.Name)
+			fields := []zap.Field{zap.String("name", probe.Name)}
+			if probe.NetNS != "" {
+				fields = append(fields, zap.String("netns", probe.NetNS))
+			}
+			l.Debug("starting http prober", fields...)
+			prober, err := probehttp.New(l, dnsRunner, probe.Name, nsManager)
 			if err != nil {
 				return err
 			}
 			prober.SetConfig(probe.HTTP)
+			prober.SetNamespace(probe.NetNS)
 			prober.Start(ctx)
 			runningProbers.AddHTTP(probe.Name, prober)
 		case "dns":
-			l.Debug("starting dns prober", zap.String("name", probe.Name))
-			prober, err := probedns.New(l, dnsRunner, probe.Name)
+			fields := []zap.Field{zap.String("name", probe.Name)}
+			if probe.NetNS != "" {
+				fields = append(fields, zap.String("netns", probe.NetNS))
+			}
+			l.Debug("starting dns prober", fields...)
+			prober, err := probedns.New(l, dnsRunner, probe.Name, nsManager)
 			if err != nil {
 				return err
 			}
 			prober.SetConfig(probe.DNS)
+			prober.SetNamespace(probe.NetNS)
 			prober.Start(ctx)
 			runningProbers.AddDNS(probe.Name, prober)
 		}
@@ -158,14 +180,16 @@ func run(cmd *cobra.Command, _ []string) error {
 					if exist {
 						l.Info("update ping probe", zap.String("name", newConfProbe.Name))
 						prober.SetConfig(newConfProbe.Ping)
+						prober.SetNamespace(newConfProbe.NetNS)
 					} else {
 						l.Info("start ping probe", zap.String("name", newConfProbe.Name))
-						prober, err := probeping.New(l, dnsRunner, newConfProbe.Name)
+						prober, err := probeping.New(l, dnsRunner, newConfProbe.Name, nsManager)
 						if err != nil {
 							l.Warn("failed to create new ping prober", zap.Error(err))
 							continue
 						}
 						prober.SetConfig(newConfProbe.Ping)
+						prober.SetNamespace(newConfProbe.NetNS)
 						prober.Start(ctx)
 						runningProbers.AddPing(newConfProbe.Name, prober)
 					}
@@ -174,14 +198,16 @@ func run(cmd *cobra.Command, _ []string) error {
 					if exist {
 						l.Info("update http probe", zap.String("name", newConfProbe.Name))
 						prober.SetConfig(newConfProbe.HTTP)
+						prober.SetNamespace(newConfProbe.NetNS)
 					} else {
 						l.Info("start new http probe", zap.String("name", newConfProbe.Name))
-						prober, err := probehttp.New(l, dnsRunner, newConfProbe.Name)
+						prober, err := probehttp.New(l, dnsRunner, newConfProbe.Name, nsManager)
 						if err != nil {
 							l.Warn("failed to create new http prober", zap.Error(err))
 							continue
 						}
 						prober.SetConfig(newConfProbe.HTTP)
+						prober.SetNamespace(newConfProbe.NetNS)
 						prober.Start(ctx)
 						runningProbers.AddHTTP(newConfProbe.Name, prober)
 					}
@@ -190,14 +216,16 @@ func run(cmd *cobra.Command, _ []string) error {
 					if exist {
 						l.Info("update dns probe", zap.String("name", newConfProbe.Name))
 						prober.SetConfig(newConfProbe.DNS)
+						prober.SetNamespace(newConfProbe.NetNS)
 					} else {
 						l.Info("start new dns probe", zap.String("name", newConfProbe.Name))
-						prober, err := probedns.New(l, dnsRunner, newConfProbe.Name)
+						prober, err := probedns.New(l, dnsRunner, newConfProbe.Name, nsManager)
 						if err != nil {
 							l.Warn("failed to create new dns prober", zap.Error(err))
 							continue
 						}
 						prober.SetConfig(newConfProbe.DNS)
+						prober.SetNamespace(newConfProbe.NetNS)
 						prober.Start(ctx)
 						runningProbers.AddDNS(newConfProbe.Name, prober)
 					}

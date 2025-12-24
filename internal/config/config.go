@@ -13,11 +13,12 @@ type Config struct {
 }
 
 type ProbeConfig struct {
-	Name string      `yaml:"name"`
-	Type string      `yaml:"type"`
-	Ping *PingConfig `yaml:"ping,omitempty"`
-	HTTP *HTTPConfig `yaml:"http,omitempty"`
-	DNS  *DNSConfig  `yaml:"dns,omitempty"`
+	Name  string      `yaml:"name"`
+	Type  string      `yaml:"type"`
+	NetNS string      `yaml:"netns,omitempty"`
+	Ping  *PingConfig `yaml:"ping,omitempty"`
+	HTTP  *HTTPConfig `yaml:"http,omitempty"`
+	DNS   *DNSConfig  `yaml:"dns,omitempty"`
 }
 
 type PingTarget struct {

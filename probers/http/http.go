@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
+	"github.com/cuteip/proberchan/internal/netnshelper"
 	"github.com/cuteip/proberchan/internal/timeutil"
 	"github.com/cuteip/proberchan/otelconst"
 	"github.com/cuteip/proberchan/probinghttp"
@@ -41,14 +43,16 @@ var (
 type Runner struct {
 	l            *zap.Logger
 	dns          *dnsutil.Runner
+	nsExecutor   netnshelper.Executor
 	responseTime metric.Int64Histogram
 	ttfb         metric.Int64Histogram
 	attempts     metric.Int64Counter
 	failed       metric.Int64Counter
 
-	name  string
-	state RunnerState
-	stop  chan struct{}
+	name      string
+	state     RunnerState
+	namespace namespaceState
+	stop      chan struct{}
 }
 
 type RunnerState struct {
@@ -56,7 +60,24 @@ type RunnerState struct {
 	conf *config.HTTPConfig
 }
 
-func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
+type namespaceState struct {
+	mu   sync.RWMutex
+	name string
+}
+
+func (n *namespaceState) Set(name string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.name = strings.TrimSpace(name)
+}
+
+func (n *namespaceState) Get() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.name
+}
+
+func New(l *zap.Logger, dns *dnsutil.Runner, name string, executor netnshelper.Executor) (*Runner, error) {
 	responseTime, err := otel.Meter("proberchan").Int64Histogram("http_response_time",
 		metric.WithUnit("ns"),
 		metric.WithDescription("http response time of http probes"),
@@ -87,6 +108,7 @@ func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
 	return &Runner{
 		l:            l,
 		dns:          dns,
+		nsExecutor:   executor,
 		responseTime: responseTime,
 		ttfb:         ttfb,
 		attempts:     attemptsCounter,
@@ -95,6 +117,9 @@ func New(l *zap.Logger, dns *dnsutil.Runner, name string) (*Runner, error) {
 		state: RunnerState{
 			mu:   sync.RWMutex{},
 			conf: &config.HTTPConfig{},
+		},
+		namespace: namespaceState{
+			mu: sync.RWMutex{},
 		},
 		stop: make(chan struct{}),
 	}, nil
@@ -110,6 +135,32 @@ func (r *Runner) SetConfig(conf *config.HTTPConfig) {
 	r.state.mu.Lock()
 	defer r.state.mu.Unlock()
 	r.state.conf = conf
+}
+
+func (r *Runner) SetNamespace(namespace string) {
+	r.namespace.Set(namespace)
+}
+
+func (r *Runner) GetNamespace() string {
+	return r.namespace.Get()
+}
+
+func (r *Runner) withNamespace(ctx context.Context, fn func(context.Context) error) error {
+	if r.nsExecutor == nil {
+		return fn(ctx)
+	}
+	namespace := r.GetNamespace()
+	if namespace == "" {
+		return fn(ctx)
+	}
+	return r.nsExecutor.WithNamespace(ctx, namespace, fn)
+}
+
+func (r *Runner) logFields(fields ...zap.Field) []zap.Field {
+	if namespace := r.GetNamespace(); namespace != "" {
+		fields = append(fields, zap.String("netns", namespace))
+	}
+	return fields
 }
 
 func (r *Runner) Start(ctx context.Context) {
@@ -148,7 +199,7 @@ func (r *Runner) probe(ctx context.Context, conf *config.HTTPConfig) {
 			targetURL, err := url.Parse(target.URL)
 			if err != nil {
 				r.failed.Add(ctx, 1, metric.WithAttributes(attrReasonFailedToParseURL))
-				r.l.Warn("failed to parse URL", zap.Error(err))
+				r.l.Warn("failed to parse URL", r.logFields(zap.Error(err))...)
 				return
 			}
 			baseAttr := append(baseAttr, attribute.String("target", targetURL.String()))
@@ -164,67 +215,73 @@ func (r *Runner) probe(ctx context.Context, conf *config.HTTPConfig) {
 }
 
 func (r *Runner) probeByTarget(ctx context.Context, target *url.URL, baseAttrs []attribute.KeyValue) {
-	var timeout time.Duration
-	if r.GetConfig().TimeoutMs == 0 {
-		timeout = defaultTimeout
-	} else {
-		timeout = time.Duration(r.GetConfig().TimeoutMs) * time.Millisecond
-	}
-
-	var userAgent string
-	if r.GetConfig().UserAgent == "" {
-		userAgent = defaultUserAgent
-	} else {
-		userAgent = r.GetConfig().UserAgent
-	}
-
-	type ipVersion struct {
-		version int
-		network string // net.Dial network
-	}
-	ipVersions := []ipVersion{}
-	for _, ipv := range r.GetConfig().ResolveIPVersions {
-		switch ipv {
-		case 4:
-			ipVersions = append(ipVersions, ipVersion{version: 4, network: "tcp4"})
-		case 6:
-			ipVersions = append(ipVersions, ipVersion{version: 6, network: "tcp6"})
-		default:
-			r.l.Warn("unknown resolve_ip_versions", zap.Int("ip_version", ipv))
+	exec := func(ctx context.Context) error {
+		var timeout time.Duration
+		if r.GetConfig().TimeoutMs == 0 {
+			timeout = defaultTimeout
+		} else {
+			timeout = time.Duration(r.GetConfig().TimeoutMs) * time.Millisecond
 		}
+
+		var userAgent string
+		if r.GetConfig().UserAgent == "" {
+			userAgent = defaultUserAgent
+		} else {
+			userAgent = r.GetConfig().UserAgent
+		}
+
+		type ipVersion struct {
+			version int
+			network string // net.Dial network
+		}
+		ipVersions := []ipVersion{}
+		for _, ipv := range r.GetConfig().ResolveIPVersions {
+			switch ipv {
+			case 4:
+				ipVersions = append(ipVersions, ipVersion{version: 4, network: "tcp4"})
+			case 6:
+				ipVersions = append(ipVersions, ipVersion{version: 6, network: "tcp6"})
+			default:
+				r.l.Warn("unknown resolve_ip_versions", r.logFields(zap.Int("ip_version", ipv))...)
+			}
+		}
+		for _, ipv := range ipVersions {
+			baseAttrs2 := append(baseAttrs, attribute.Int("ip_version", ipv.version))
+			httpCaller := probinghttp.NewHttpCaller(target.String(),
+				probinghttp.WithHTTPCallerLogger(NewLogger(r.l, r, baseAttrs2)),
+				probinghttp.WithHTTPCallerClient(&http.Client{
+					Transport: newCustomTransport(ipv.network, userAgent),
+					// timeout などは WithHTTPCallerTimeout が優先される？
+					// リダイレクト先を追わない
+					CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+						return http.ErrUseLastResponse
+					},
+				}),
+				probinghttp.WithHTTPCallerTimeout(timeout),
+				probinghttp.WithHTTPCallerMethod(http.MethodGet),
+				probinghttp.WithHTTPCallerOnResp(func(suite *probinghttp.TraceSuite, info *probinghttp.HTTPCallInfo) {
+					responseTime := suite.GetGeneralEnd().Sub(suite.GetGeneralStart()) // おそらく DNS 名前解決時間含む
+					ttfb := suite.GetFirstByteReceived().Sub(suite.GetGeneralStart())  // おそらく DNS 名前解決時間含む
+					attrs := append(baseAttrs2, attribute.Int("status_code", info.StatusCode))
+					r.responseTime.Record(ctx, responseTime.Nanoseconds(), metric.WithAttributes(attrs...))
+					r.ttfb.Record(ctx, ttfb.Nanoseconds(), metric.WithAttributes(attrs...))
+				}),
+				probinghttp.WithHTTPCallerOnConnDone(func(suite *probinghttp.TraceSuite, network, addr string, err error) {
+					if err != nil {
+						// http.Client Do の err != nil が多く、ここにはほとんど来ず、Logger.Errorf() に来る？
+						attrs := append(baseAttrs2, attrReasonUnknown)
+						r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
+						r.l.Warn("failed to connect", r.logFields(zap.Error(err))...)
+					}
+				}),
+			)
+			httpCaller.RunWithContext(ctx)
+			httpCaller.Stop()
+		}
+		return nil
 	}
-	for _, ipv := range ipVersions {
-		baseAttrs2 := append(baseAttrs, attribute.Int("ip_version", ipv.version))
-		httpCaller := probinghttp.NewHttpCaller(target.String(),
-			probinghttp.WithHTTPCallerLogger(NewLogger(r.l, r, baseAttrs2)),
-			probinghttp.WithHTTPCallerClient(&http.Client{
-				Transport: newCustomTransport(ipv.network, userAgent),
-				// timeout などは WithHTTPCallerTimeout が優先される？
-				// リダイレクト先を追わない
-				CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
-			}),
-			probinghttp.WithHTTPCallerTimeout(timeout),
-			probinghttp.WithHTTPCallerMethod(http.MethodGet),
-			probinghttp.WithHTTPCallerOnResp(func(suite *probinghttp.TraceSuite, info *probinghttp.HTTPCallInfo) {
-				responseTime := suite.GetGeneralEnd().Sub(suite.GetGeneralStart()) // おそらく DNS 名前解決時間含む
-				ttfb := suite.GetFirstByteReceived().Sub(suite.GetGeneralStart())  // おそらく DNS 名前解決時間含む
-				attrs := append(baseAttrs2, attribute.Int("status_code", info.StatusCode))
-				r.responseTime.Record(ctx, responseTime.Nanoseconds(), metric.WithAttributes(attrs...))
-				r.ttfb.Record(ctx, ttfb.Nanoseconds(), metric.WithAttributes(attrs...))
-			}),
-			probinghttp.WithHTTPCallerOnConnDone(func(suite *probinghttp.TraceSuite, network, addr string, err error) {
-				if err != nil {
-					// http.Client Do の err != nil が多く、ここにはほとんど来ず、Logger.Errorf() に来る？
-					attrs := append(baseAttrs2, attrReasonUnknown)
-					r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
-					r.l.Warn("failed to connect", zap.Error(err))
-				}
-			}),
-		)
-		httpCaller.RunWithContext(ctx)
-		httpCaller.Stop()
+	if err := r.withNamespace(ctx, exec); err != nil {
+		r.l.Warn("failed to execute http probe in netns", r.logFields(zap.Error(err))...)
 	}
 }
 
@@ -273,7 +330,7 @@ func NewLogger(l *zap.Logger, r *Runner, baseAttrs []attribute.KeyValue) probing
 }
 
 func (l *logger) Debugf(format string, args ...interface{}) {
-	l.l.Debug(format, convertToFields(args)...)
+	l.l.Debug(format, l.r.logFields(convertToFields(args)...)...)
 }
 
 func (l *logger) Errorf(format string, args ...interface{}) {
@@ -303,18 +360,18 @@ func (l *logger) Errorf(format string, args ...interface{}) {
 		l.r.failed.Add(ctx, 1, metric.WithAttributes(attrs...))
 	}
 
-	l.l.Error(format, convertToFields(args)...)
+	l.l.Error(format, l.r.logFields(convertToFields(args)...)...)
 }
 
 func (l *logger) Fatalf(format string, args ...interface{}) {
 	// Fatal で exit されると困るので warn に落とす
-	l.l.Warn(format, convertToFields(args)...)
+	l.l.Warn(format, l.r.logFields(convertToFields(args)...)...)
 }
 
 func (l *logger) Infof(format string, args ...interface{}) {
-	l.l.Info(format, convertToFields(args)...)
+	l.l.Info(format, l.r.logFields(convertToFields(args)...)...)
 }
 
 func (l *logger) Warnf(format string, args ...interface{}) {
-	l.l.Warn(format, convertToFields(args)...)
+	l.l.Warn(format, l.r.logFields(convertToFields(args)...)...)
 }
