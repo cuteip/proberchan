@@ -17,21 +17,6 @@ export OTEL_RESOURCE_ATTRIBUTES="service.name=proberchan,service.instance.id=$(c
 ./proberchan --log-level info
 ```
 
-## Network namespaces
-
-Each probe entry can optionally set `netns` to the name managed by `ip netns`.
-When specified, DNS resolution and probe traffic are executed inside that namespace via [`github.com/vishvananda/netns`](https://github.com/vishvananda/netns), which requires `CAP_NET_ADMIN` on the host process.
-Example:
-
-```yaml
-probes:
-  - name: "ping_v4"
-    type: "ping"
-    netns: "tenant-blue"
-    ping:
-      # ...
-```
-
 ## dev memo
 
 ```shell
