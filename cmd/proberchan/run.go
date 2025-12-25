@@ -13,6 +13,7 @@ import (
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
 	"github.com/cuteip/proberchan/internal/netnshelper"
+	"github.com/cuteip/proberchan/internal/sysctl"
 	"github.com/cuteip/proberchan/probers"
 	probedns "github.com/cuteip/proberchan/probers/dns"
 	probehttp "github.com/cuteip/proberchan/probers/http"
@@ -54,6 +55,20 @@ func run(cmd *cobra.Command, _ []string) error {
 			l.Warn("failed to close netns manager", zap.Error(err))
 		}
 	}()
+	sysctlApplier := sysctl.NewApplier(nsManager)
+	applyPingSysctls := func(ctx context.Context, namespace, probeName string) {
+		if namespace == "" {
+			return
+		}
+		if err := sysctlApplier.EnsurePingGroupRange(ctx, namespace); err != nil {
+			fields := []zap.Field{zap.String("netns", namespace)}
+			if probeName != "" {
+				fields = append(fields, zap.String("probe", probeName))
+			}
+			fields = append(fields, zap.Error(err))
+			l.Error("failed to apply sysctl parameters", fields...)
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	shutdownMeterProvider, err := initMeterProvider(ctx)
@@ -97,6 +112,7 @@ func run(cmd *cobra.Command, _ []string) error {
 			}
 			prober.SetConfig(probe.Ping)
 			prober.SetNamespace(probe.NetNS)
+			applyPingSysctls(ctx, probe.NetNS, probe.Name)
 			prober.Start(ctx)
 			runningProbers.AddPing(probe.Name, prober)
 		case "http":
@@ -181,6 +197,7 @@ func run(cmd *cobra.Command, _ []string) error {
 						l.Info("update ping probe", zap.String("name", newConfProbe.Name))
 						prober.SetConfig(newConfProbe.Ping)
 						prober.SetNamespace(newConfProbe.NetNS)
+						applyPingSysctls(ctx, newConfProbe.NetNS, newConfProbe.Name)
 					} else {
 						l.Info("start ping probe", zap.String("name", newConfProbe.Name))
 						prober, err := probeping.New(l, dnsRunner, newConfProbe.Name, nsManager)
@@ -190,6 +207,7 @@ func run(cmd *cobra.Command, _ []string) error {
 						}
 						prober.SetConfig(newConfProbe.Ping)
 						prober.SetNamespace(newConfProbe.NetNS)
+						applyPingSysctls(ctx, newConfProbe.NetNS, newConfProbe.Name)
 						prober.Start(ctx)
 						runningProbers.AddPing(newConfProbe.Name, prober)
 					}
