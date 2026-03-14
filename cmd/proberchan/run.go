@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cuteip/proberchan/internal/config"
 	"github.com/cuteip/proberchan/internal/dnsutil"
@@ -31,6 +32,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+)
+
+const (
+	pingSysctlRetryTimeout  = 5 * time.Second
+	pingSysctlRetryInterval = 200 * time.Millisecond
 )
 
 func run(cmd *cobra.Command, _ []string) error {
@@ -56,18 +62,29 @@ func run(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 	sysctlApplier := sysctl.NewApplier(nsManager)
-	applyPingSysctls := func(ctx context.Context, namespace, probeName string) {
-		if namespace == "" {
-			return
-		}
-		if err := sysctlApplier.EnsurePingGroupRange(ctx, namespace); err != nil {
-			fields := []zap.Field{zap.String("netns", namespace)}
+	applyPingSysctls := func(ctx context.Context, namespace, probeName string) error {
+		if err := ensurePingSysctlWithRetry(
+			ctx,
+			namespace,
+			pingSysctlRetryTimeout,
+			pingSysctlRetryInterval,
+			sysctlApplier.EnsurePingGroupRange,
+		); err != nil {
+			fields := []zap.Field{
+				zap.Duration("retry_timeout", pingSysctlRetryTimeout),
+				zap.Duration("retry_interval", pingSysctlRetryInterval),
+			}
+			if namespace != "" {
+				fields = append(fields, zap.String("netns", namespace))
+			}
 			if probeName != "" {
 				fields = append(fields, zap.String("probe", probeName))
 			}
 			fields = append(fields, zap.Error(err))
 			l.Error("failed to apply sysctl parameters", fields...)
+			return err
 		}
+		return nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -112,7 +129,9 @@ func run(cmd *cobra.Command, _ []string) error {
 			}
 			prober.SetConfig(probe.Ping)
 			prober.SetNamespace(probe.NetNS)
-			applyPingSysctls(ctx, probe.NetNS, probe.Name)
+			if err := applyPingSysctls(ctx, probe.NetNS, probe.Name); err != nil {
+				return errors.Wrapf(err, "failed to initialize ping probe %q", probe.Name)
+			}
 			prober.Start(ctx)
 			runningProbers.AddPing(probe.Name, prober)
 		case "http":
@@ -195,9 +214,16 @@ func run(cmd *cobra.Command, _ []string) error {
 					prober, exist := runningProbers.GetPing(newConfProbe.Name)
 					if exist {
 						l.Info("update ping probe", zap.String("name", newConfProbe.Name))
+						if err := applyPingSysctls(ctx, newConfProbe.NetNS, newConfProbe.Name); err != nil {
+							l.Warn("skip ping probe update due to sysctl error",
+								zap.String("name", newConfProbe.Name),
+								zap.String("netns", newConfProbe.NetNS),
+								zap.Error(err),
+							)
+							continue
+						}
 						prober.SetConfig(newConfProbe.Ping)
 						prober.SetNamespace(newConfProbe.NetNS)
-						applyPingSysctls(ctx, newConfProbe.NetNS, newConfProbe.Name)
 					} else {
 						l.Info("start ping probe", zap.String("name", newConfProbe.Name))
 						prober, err := probeping.New(l, dnsRunner, newConfProbe.Name, nsManager)
@@ -205,9 +231,16 @@ func run(cmd *cobra.Command, _ []string) error {
 							l.Warn("failed to create new ping prober", zap.Error(err))
 							continue
 						}
+						if err := applyPingSysctls(ctx, newConfProbe.NetNS, newConfProbe.Name); err != nil {
+							l.Warn("skip starting ping probe due to sysctl error",
+								zap.String("name", newConfProbe.Name),
+								zap.String("netns", newConfProbe.NetNS),
+								zap.Error(err),
+							)
+							continue
+						}
 						prober.SetConfig(newConfProbe.Ping)
 						prober.SetNamespace(newConfProbe.NetNS)
-						applyPingSysctls(ctx, newConfProbe.NetNS, newConfProbe.Name)
 						prober.Start(ctx)
 						runningProbers.AddPing(newConfProbe.Name, prober)
 					}
@@ -258,6 +291,65 @@ func run(cmd *cobra.Command, _ []string) error {
 	<-ctx.Done()
 	l.Info("context canceled")
 	return nil
+}
+
+func ensurePingSysctlWithRetry(
+	ctx context.Context,
+	namespace string,
+	timeout time.Duration,
+	interval time.Duration,
+	ensure func(context.Context, string) error,
+) error {
+	if ensure == nil {
+		return fmt.Errorf("nil sysctl ensure function")
+	}
+	if timeout < 0 {
+		timeout = 0
+	}
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return fmt.Errorf("context canceled while applying ping sysctl after %v: %w", lastErr, err)
+			}
+			return fmt.Errorf("context canceled while applying ping sysctl: %w", err)
+		}
+
+		if err := ensure(ctx, namespace); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if timeout == 0 {
+			return fmt.Errorf("failed to apply ping sysctl: %w", lastErr)
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("failed to apply ping sysctl within %s: %w", timeout, lastErr)
+		}
+
+		wait := interval
+		if remaining < wait {
+			wait = remaining
+		}
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return fmt.Errorf("context canceled while waiting to retry ping sysctl: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func initMeterProvider(ctx context.Context) (func(context.Context) error, error) {

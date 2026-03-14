@@ -1,0 +1,47 @@
+{
+    "name": "${localWorkspaceFolderBasename}",
+    "image": "mcr.microsoft.com/devcontainers/base:trixie",
+    "features": {
+        "ghcr.io/devcontainers/features/go:1": {},
+        "ghcr.io/devcontainers/features/copilot-cli:1": {},
+        "ghcr.io/aquaproj/devcontainer-features/aqua-installer:0": {
+            "aqua_version": "v2.53.3",
+        },
+    },
+    "runArgs": [
+        "--name",
+        "${localWorkspaceFolderBasename}",
+    ],
+    "customizations": {
+        "vscode": {
+            "settings": {},
+            "extensions": [
+                "golang.go",
+            ]
+        },
+    },
+    "mounts": [
+        {
+            "type": "bind",
+            "source": "${localEnv:HOME}/.copilot",
+            "target": "/root/.copilot",
+        },
+        {
+            "type": "bind",
+            "source": "${localEnv:SSH_AUTH_SOCK}",
+            "target": "/tmp/ssh_auth_sock",
+        },
+    ],
+    "remoteEnv": {
+        "SSH_AUTH_SOCK": "/tmp/ssh_auth_sock",
+        "LANG": "C.UTF-8",
+        "TERM": "screen-256color",
+        "PATH": "/root/.local/share/aquaproj-aqua/bin:${containerEnv:PATH}",
+    },
+    "containerEnv": {
+        "INSTALL_GO_TOOLS": "false", // disable golangci-lint binary build
+    },
+    "postCreateCommand": "./.devcontainer/post-create-command.sh",
+    "postStartCommand": "sudo chown 0:0 /tmp/ssh_auth_sock && sudo chmod 600 /tmp/ssh_auth_sock",
+    "remoteUser": "root", // storage-chown-maps 抑止
+}
